@@ -1,0 +1,32 @@
+{
+  "name": "leaflet.easyvelocity",
+  "version": "0.1.0",
+  "description": "Leaflet plugin for wind and current velocity fields, with direct GRIB2 loading and animated particles.",
+  "main": "dist/leaflet.easyvelocity.js",
+  "browser": "dist/leaflet.easyvelocity.js",
+  "files": [
+    "dist",
+    "src",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node tools/build-dist.js"
+  },
+  "keywords": [
+    "leaflet",
+    "leaflet-plugin",
+    "wind",
+    "ocean-current",
+    "velocity-field",
+    "weather",
+    "grib2",
+    "particles",
+    "canvas"
+  ],
+  "license": "UNLICENSED",
+  "private": true,
+  "peerDependencies": {
+    "leaflet": "^1.9.0"
+  }
+}

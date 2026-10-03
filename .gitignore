@@ -1,0 +1,7 @@
+# Editor and operating-system files
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Optional local dependencies / caches
+node_modules/

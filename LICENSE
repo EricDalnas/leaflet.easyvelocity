@@ -1,0 +1,35 @@
+leaflet.easyvelocity: PROPRIETARY SOFTWARE LICENSE NOTICE
+
+Copyright (c) 2026 [OWNER NAME]. All rights reserved.
+
+This software, including its source code, documentation and build scripts (the "Software"),
+is proprietary and confidential. It is NOT open-source software.
+
+No licence or right of any kind is granted to anyone to use, copy, modify, merge, publish,
+distribute, sublicense, sell, host, or create derivative works of the Software, or to
+disclose its source code, except as expressly permitted in a separate written agreement with
+the copyright holder. Access to this repository or to a copy of the Software does not grant
+any such right.
+
+You may not reverse engineer, decompile or disassemble the Software, except to the extent
+that applicable law expressly permits it despite this restriction.
+
+THIRD-PARTY MATERIAL AND DATA (not covered by this notice)
+
+- The Software does not include Leaflet or Leaflet.TimeDimension. The example page loads them
+  from public CDNs under their own licences (Leaflet: BSD-2-Clause; Leaflet.TimeDimension:
+  MIT; iso8601-js-period: see its package).
+- The files in examples/data are unaltered NOAA data. NOAA's terms apply to them, not this
+  notice. See examples/data/NOTICE.txt.
+- Map tiles shown by the example page come from OpenStreetMap and are subject to the
+  OpenStreetMap tile usage policy and attribution requirements.
+
+NO WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM,
+DAMAGES OR OTHER LIABILITY ARISING FROM THE USE OF THE SOFTWARE.
+
+(Replace [OWNER NAME] with the legal owner. Have counsel review this text before relying on
+it; it is a plain template, not legal advice.)

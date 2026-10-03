@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>leaflet.easyvelocity demo</title>
+
+    <link
+        rel="stylesheet"
+        href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    />
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <!-- Leaflet.TimeDimension (slider/player control) + its ISO8601 dependency; must load before leaflet.easyvelocity.js -->
+    <link
+        rel="stylesheet"
+        href="https://cdn.jsdelivr.net/npm/leaflet-timedimension@1.1.1/dist/leaflet.timedimension.control.min.css"
+    />
+    <script src="https://cdn.jsdelivr.net/npm/iso8601-js-period@0.2.1/iso8601.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/leaflet-timedimension@1.1.1/dist/leaflet.timedimension.min.js"></script>
+
+    <!-- leaflet.easyvelocity. By default the readable source files load one by one (edit src/ and refresh).
+         Add ?dist to the page URL to load the single built file dist/leaflet.easyvelocity.js instead, which
+         is what an application would use: one tag, after Leaflet (and after TimeDimension if used):
+             <script src="leaflet.easyvelocity.js"></script> -->
+    <script>
+        (function () {
+            // Same order as tools/build-dist.js; leaflet.easyvelocity must load last.
+            var files = ["grib2-unpack", "grib2-reader", "wind-data", "test-field", "grib-loader",
+                "time-sources", "gfs", "frame-cache", "speed-field", "particles", "time-dimension", "leaflet.easyvelocity"];
+            var tags = new URLSearchParams(location.search).has("dist")
+                ? ['<script src="../dist/leaflet.easyvelocity.js"><\/script>']
+                : files.map(function (f) { return '<script src="../src/' + f + '.js"><\/script>'; });
+            document.write(tags.join(""));
+        })();
+    </script>
+
+    <style>
+        html, body { height: 100%; margin: 0; font: 13px/1.4 system-ui, sans-serif; }
+        #map { position: absolute; inset: 0; }
+
+        .panel {
+            position: absolute; z-index: 1000;
+            background: rgba(255, 255, 255, 0.94); color: #222;
+            border-radius: 6px; box-shadow: 0 1px 6px rgba(0, 0, 0, 0.4);
+            padding: 10px 12px;
+        }
+        #controls { top: 10px; right: 10px; width: 280px; }
+        #controls h1 { font-size: 14px; margin: 0 0 8px; }
+        #controls .row { display: flex; align-items: center; gap: 6px; margin: 6px 0; }
+        #controls .row label { flex: 0 0 82px; }
+        #controls input[type=range] { flex: 1; min-width: 0; }
+        #controls input[type=text], #controls select { flex: 1; min-width: 0; }
+        #controls .val { flex: 0 0 44px; text-align: right; font-variant-numeric: tabular-nums; }
+        [hidden] { display: none !important; }
+        #controls .checks { display: flex; gap: 14px; }
+        #controls .checks label { flex: none; white-space: nowrap; }
+        #controls hr { border: 0; border-top: 1px solid #ddd; margin: 8px 0; }
+        #source { word-break: break-all; font-size: 11px; color: #444; }
+        #note { font-size: 11px; color: #555; margin: 4px 0; }
+        #status { margin-top: 4px; font-size: 12px; }
+        #status.error { color: #b00020; font-weight: 600; }
+        #cursor { font-size: 12px; color: #444; min-height: 1.4em; }
+
+        #legend { left: 10px; bottom: 110px; width: 240px; }
+        #legend .bar { height: 12px; border-radius: 2px; }
+        #legend .labels { display: flex; justify-content: space-between; font-size: 11px; margin-top: 2px; }
+        #legend .title { font-weight: 600; margin-bottom: 4px; }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+
+    <div id="controls" class="panel">
+        <h1>Velocity field</h1>
+
+        <div class="row">
+            <label for="sourceSelect">Source</label>
+            <select id="sourceSelect"></select>
+        </div>
+        <div id="note"></div>
+        <div class="row" id="customRow" hidden>
+            <input type="text" id="customUrl" placeholder="https://…/file.grib2" />
+            <button id="loadBtn">Load</button>
+        </div>
+        <div id="source"></div>
+        <div id="status"></div>
+
+        <hr />
+
+        <div class="row">
+            <button id="toggleBtn">Stop particles</button>
+            <button id="reloadBtn">Reload</button>
+        </div>
+        <div class="row">
+            <label for="count">Particles</label>
+            <input type="range" id="count" min="500" max="20000" step="500" value="4000" />
+            <span class="val" id="countVal">4000</span>
+        </div>
+        <div class="row">
+            <label for="speed">Speed</label>
+            <input type="range" id="speed" min="0.1" max="4" step="0.1" value="1" />
+            <span class="val" id="speedVal">1.0×</span>
+        </div>
+        <div class="row checks">
+            <label><input type="checkbox" id="showParticles" checked /> Particles</label>
+            <label><input type="checkbox" id="showField" checked /> Speed field</label>
+        </div>
+
+        <hr />
+        <div id="cursor">Move the mouse over the map.</div>
+    </div>
+
+    <div id="legend" class="panel">
+        <div class="title">Wind speed (m/s)</div>
+        <div class="bar"></div>
+        <div class="labels"></div>
+    </div>
+
+    <script>
+        // Add ?preferCanvas=1 to the URL to test with Leaflet's own canvas renderer.
+
+        // ---- the demo's data sources --------------------------------------
+        // Every source is described the same way: its time steps (`times`, ms) and either a fixed
+        // `source` or a `timeSource` function that maps a time to a file. Live NOAA sources are
+        // computed from the clock when the page loads, so they never go out of date.
+        const HOUR = 3600e3;
+        const firstHour = Math.floor(Date.now() / HOUR) * HOUR;
+        const testTimes = Array.from({ length: 25 }, (_, i) => firstHour + i * HOUR);
+
+        // Same colours as the default scale, stretched for stronger winds aloft.
+        const scaledColors = (factor) => L.easyVelocity.defaultColorScale.map(([speed, color]) => [speed * factor, color]);
+        const colors = { surface: L.easyVelocity.defaultColorScale, mid: scaledColors(1.5), jet: scaledColors(3) };
+
+        const NOAA = "Wind data: NOAA/NCEP";
+        const gfs10 = L.easyVelocity.gfsForecast({ from: 0, to: 48, step: 3 });
+        const gfsPast = L.easyVelocity.gfsAnalyses({ cycles: 8 });
+        const gfsCoarse = L.easyVelocity.gfsForecast({ from: 0, to: 120, step: 6, resolution: "1p00" });
+        const gefs = L.easyVelocity.gefsMeanForecast({ from: 0, to: 120, step: 6 });
+
+        // Archived NOAA GFS analyses bundled in data/ (see data/NOTICE.txt): no network needed.
+        const ian = L.easyVelocity.timeList(["06", "12", "18"].map((hh) => ({
+            time: "2022-09-28T" + hh + ":00:00Z", source: "data/gfs-20220928-" + hh + "z-f000-10m-uv.grib2" })));
+        const elliott = L.easyVelocity.timeList(["06", "12", "18"].map((hh) => ({
+            time: "2022-12-23T" + hh + ":00:00Z", source: "data/gfs-20221223-" + hh + "z-f000-10m-uv.grib2" })));
+
+        const datasets = {
+            test: {
+                group: "Synthetic", label: "Synthetic test field (24 h)",
+                note: "Generated in the browser. The hole near 46°N 62°W shows how missing data is handled.",
+                source: "test", times: testTimes
+            },
+            gfs10: {
+                group: "Live NOAA (follows the clock)", label: "GFS 10 m wind, next 48 h",
+                note: "Newest GFS cycle on AWS, 0.25°, 3-hourly. Each step downloads ~2 MB.",
+                attribution: NOAA + " GFS", timeSource: gfs10.timeSource, times: gfs10.times
+            },
+            gfsPast: {
+                group: "Live NOAA (follows the clock)", label: "GFS 10 m wind, last 2 days",
+                note: "The model's analysis (its best picture of the real weather) for the last 8 cycles.",
+                attribution: NOAA + " GFS", timeSource: gfsPast.timeSource, times: gfsPast.times
+            },
+            gfs850: {
+                group: "Live NOAA (follows the clock)", label: "GFS 850 hPa wind (~1.5 km up), next 48 h",
+                note: "Wind at the 850 hPa pressure level, above most surface friction. Stronger than 10 m wind.",
+                attribution: NOAA + " GFS", timeSource: gfs10.timeSource, times: gfs10.times,
+                level: 850, levelType: 100, colorScale: colors.mid
+            },
+            gfs250: {
+                group: "Live NOAA (follows the clock)", label: "GFS 250 hPa jet stream (~10 km), next 48 h",
+                note: "Wind at the 250 hPa level, where the jet stream flows at up to ~90 m/s.",
+                attribution: NOAA + " GFS", timeSource: gfs10.timeSource, times: gfs10.times,
+                level: 250, levelType: 100, colorScale: colors.jet
+            },
+            gfsCoarse: {
+                group: "Live NOAA (follows the clock)", label: "GFS 10 m wind, 1° grid, next 5 days (light)",
+                note: "Same model on a coarse 1° grid: ~16x smaller downloads, 6-hourly steps.",
+                attribution: NOAA + " GFS", timeSource: gfsCoarse.timeSource, times: gfsCoarse.times
+            },
+            gefs: {
+                group: "Live NOAA (follows the clock)", label: "GEFS ensemble-mean 10 m wind, next 5 days",
+                note: "Average of 30 perturbed GFS runs (0.5°): smoother than a single run.",
+                attribution: NOAA + " GEFS", timeSource: gefs.timeSource, times: gefs.times
+            },
+            ian: {
+                group: "Archived (bundled in data/)", label: "Hurricane Ian, 28 Sep 2022",
+                note: "GFS analyses at 06, 12 and 18 UTC while Ian approached Florida (landfall ~19 UTC).",
+                attribution: NOAA + " GFS (archived)", timeSource: ian.timeSource, times: ian.times,
+                view: { center: [26, -83], zoom: 6 }, startAt: ian.times[0]
+            },
+            elliott: {
+                group: "Archived (bundled in data/)", label: "Winter Storm Elliott, 23 Dec 2022",
+                note: "GFS analyses at 06, 12 and 18 UTC as the Arctic outbreak crossed North America.",
+                attribution: NOAA + " GFS (archived)", timeSource: elliott.timeSource, times: elliott.times,
+                view: { center: [42, -92], zoom: 4 }, startAt: elliott.times[0]
+            }
+        };
+
+        const map = L.map("map", {
+            preferCanvas: new URLSearchParams(location.search).has("preferCanvas"),
+            timeDimension: true,
+            timeDimensionOptions: { times: testTimes, currentTime: testTimes[0], loadingTimeout: 30000 },
+            timeDimensionControl: true,
+            timeDimensionControlOptions: {
+                position: "bottomleft",
+                timeSliderDragUpdate: false,
+                playerOptions: { transitionTime: 1000, buffer: 2, minBufferReady: 1, loop: true }
+            }
+        }).setView([40, -75], 5);
+
+        L.tileLayer(
+            "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+            {
+                attribution: "&copy; OpenStreetMap contributors"
+            }
+        ).addTo(map);
+
+        // Ordinary vector layer, just to show the host map's renderer is independent of the wind canvas.
+        L.circleMarker([40, -75], { radius: 6, color: "#000", weight: 2, fillColor: "#fff", fillOpacity: 1 })
+            .bindTooltip("Regular Leaflet vector layer").addTo(map);
+
+        // To use real data, replace "test" with a GRIB2 URL, e.g. L.easyVelocity.gfsUrl().
+        // For several time steps, pass `timeSource: (timeMs) => url` instead (see gfs.timeSource).
+        const wind = L.easyVelocity({
+            source: "test",
+            particleCount: 4000,
+            particleSpeed: 1.0,
+            particleSize: 1,
+            particleOpacity: 0.8,
+            trailLength: 0.9,
+            showParticles: true,
+            showSpeedField: true,
+            opacity: 0.75
+        });
+
+        // ---- controls ----------------------------------------------------
+        const $ = (id) => document.getElementById(id);
+        const panels = [$("controls"), $("legend")];
+        panels.forEach((p) => {
+            L.DomEvent.disableClickPropagation(p);
+            L.DomEvent.disableScrollPropagation(p);
+        });
+
+        function setStatus(text, isError) {
+            $("status").textContent = text;
+            $("status").className = isError ? "error" : "";
+        }
+
+        function describeSource(src) {
+            $("source").textContent = "Source: " + (src === "test" ? "test (synthetic)" : src);
+        }
+
+        wind.on("loading", (e) => { describeSource(e.source); setStatus("Loading…"); });
+        // Only report download progress of the frame on screen (prefetches of other times are silent).
+        wind.on("progress", (e) => {
+            if (e.time == wind.getTime()) setStatus("Downloading… " + (e.loaded / 1048576).toFixed(1) + " MB");
+        });
+        wind.on("load", (e) => {
+            const i = e.data.info;
+            describeSource(e.source);
+            setStatus(i.validTime
+                ? "Loaded " + i.level + " wind, valid " + i.validTime.replace(":00.000Z", "Z") + " (" + i.loadedVia + ")"
+                : "Loaded " + i.name + (e.time != null ? ", " + new Date(e.time).toISOString().replace(":00.000Z", "Z") : ""));
+        });
+        wind.on("error", (e) => setStatus("Error: " + e.message, true));
+        wind.on("start stop", () => { $("toggleBtn").textContent = wind.isRunning() ? "Stop particles" : "Start particles"; });
+
+        // The wrapper lets the map's TimeDimension (slider, play button) drive the wind layer.
+        L.timeDimension.layer.easyVelocity(wind).addTo(map);
+
+        $("toggleBtn").onclick = () => (wind.isRunning() ? wind.stop() : wind.start());
+        $("reloadBtn").onclick = () => wind.reload();
+
+        function useDataset(name) {
+            const d = datasets[name];
+            $("note").textContent = d.note;
+            setAttribution(d.attribution);
+            wind.setOptions({
+                source: d.source || "",
+                timeSource: d.timeSource || null,
+                level: d.level || 10,
+                levelType: d.levelType || 103,
+                colorScale: d.colorScale || colors.surface
+            });
+            buildLegend();
+            if (d.view) map.setView(d.view.center, d.view.zoom);
+            map.timeDimension.setAvailableTimes(d.times, "replace"); // updates the slider and re-syncs the layer
+            if (d.startAt) map.timeDimension.setCurrentTime(d.startAt);
+        }
+
+        // Fill the dropdown from `datasets`, grouped.
+        const select = $("sourceSelect");
+        const groups = {};
+        for (const [key, d] of Object.entries(datasets)) {
+            if (!groups[d.group]) {
+                groups[d.group] = document.createElement("optgroup");
+                groups[d.group].label = d.group;
+                select.appendChild(groups[d.group]);
+            }
+            groups[d.group].appendChild(new Option(d.label, key));
+        }
+        const customGroup = document.createElement("optgroup");
+        customGroup.label = "Your own data";
+        customGroup.appendChild(new Option("Custom GRIB2 URL…", "custom"));
+        select.appendChild(customGroup);
+        $("note").textContent = datasets.test.note;
+
+        // NOAA asks for attribution when its data is shown.
+        let attribution = null;
+        function setAttribution(text) {
+            if (attribution) map.attributionControl.removeAttribution(attribution);
+            attribution = text || null;
+            if (attribution) map.attributionControl.addAttribution(attribution);
+        }
+
+        select.onchange = (e) => {
+            const v = e.target.value;
+            $("customRow").hidden = v !== "custom";
+            if (v !== "custom") useDataset(v);
+        };
+        function loadCustom() {
+            const url = $("customUrl").value.trim();
+            if (url) {
+                $("note").textContent = "Single static field: the time slider has no effect.";
+                setAttribution(null);
+                wind.setOptions({ source: url, timeSource: null, level: 10, levelType: 103, colorScale: colors.surface });
+                buildLegend();
+            } else setStatus("Enter a GRIB2 URL first.", true);
+        }
+        $("loadBtn").onclick = loadCustom;
+        $("customUrl").onkeydown = (e) => { if (e.key === "Enter") loadCustom(); };
+
+        $("count").oninput = (e) => {
+            $("countVal").textContent = e.target.value;
+            wind.setOptions({ particleCount: +e.target.value });
+        };
+        $("speed").oninput = (e) => {
+            $("speedVal").textContent = (+e.target.value).toFixed(1) + "×";
+            wind.setOptions({ particleSpeed: +e.target.value });
+        };
+        $("showParticles").onchange = (e) => wind.setOptions({ showParticles: e.target.checked });
+        $("showField").onchange = (e) => wind.setOptions({ showSpeedField: e.target.checked });
+
+        map.on("mousemove", (e) => {
+            const w = wind.getVector(e.latlng.lat, e.latlng.lng);
+            $("cursor").textContent = w
+                ? w.speed.toFixed(1) + " m/s, from " + ((Math.atan2(-w.u, -w.v) * 180 / Math.PI + 360) % 360).toFixed(0) + "°"
+                : "No wind data here";
+        });
+
+        // ---- legend ------------------------------------------------------
+        function buildLegend() {
+            const lg = wind.getLegend(), range = lg.max - lg.min;
+            const stops = lg.stops.map((s) => s.color + " " + ((s.value - lg.min) / range * 100).toFixed(1) + "%");
+            document.querySelector("#legend .bar").style.background = "linear-gradient(to right, " + stops.join(", ") + ")";
+            document.querySelector("#legend .labels").innerHTML = lg.stops
+                .filter((_, i) => i % 2 === 0 || i === lg.stops.length - 1)
+                .map((s) => "<span>" + Math.round(s.value) + "</span>").join("");
+        }
+        buildLegend();
+    </script>
+</body>
+</html>
