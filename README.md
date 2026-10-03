@@ -4,6 +4,8 @@ Leaflet plugin for gridded velocity fields: wind, ocean currents, and other U/V 
 
 **Proprietary software. Not open source.** All rights reserved, see [LICENSE](LICENSE).
 
+**Live demo:** [leaflet.easyvelocity on GitHub Pages](https://ericdalnas.github.io/leaflet.easyvelocity/examples/). Enable GitHub Pages for this repository to activate it.
+
 The package name follows the existing `leaflet.<name>` naming convention: `leaflet.easyvelocity`.
 The canonical API is `L.easyVelocity(...)` (also exposed as `L.EasyVelocity`). The old `L.windField(...)` and `L.timeDimension.layer.windField(...)` names remain as compatibility aliases.
 
