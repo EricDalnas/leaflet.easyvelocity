@@ -22,7 +22,6 @@ const files = [
     "grib-loader.js",
     "netcdf-loader.js",
     "time-sources.js",
-    "gfs.js",
     "frame-cache.js",
     "speed-field.js",
     "particles.js",

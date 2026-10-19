@@ -25,7 +25,6 @@
  *    src/grib-loader.js    URL -> VelocityData (index + Range requests, or streaming); loadSource()
  *    src/netcdf-loader.js  NetCDF URL -> VelocityData (finds the U/V variables, time and level)
  *    src/time-sources.js   list of (time, source) pairs -> times + timeSource for a time slider
- *    src/gfs.js            NOAA GFS / GEFS URL and forecast-time helpers
  *
  *  LAYER SIDE: drawing. Mixins that become methods of the layer defined in THIS file.
  *    src/frame-cache.js    loading + caching one VelocityData per time step, setTime()
@@ -65,7 +64,6 @@
         "src/netcdf4-reader.js": "netcdf4",
         "src/velocity-data.js": "VelocityData", "src/test-field.js": "createTestField", "src/grib-loader.js": "loadSource",
         "src/netcdf-loader.js": "loadNetcdf", "src/time-sources.js": "timeList",
-        "src/gfs.js": "gfsUrl",
         "src/frame-cache.js": "frameLoading", "src/speed-field.js": "speedField", "src/particles.js": "particles",
         "src/time-dimension.js": "installTimeDimension"
     };
@@ -365,12 +363,9 @@
     L.easyVelocity.Grib2 = parts.grib2;
     L.easyVelocity.NetCDF = parts.netcdf;
     L.easyVelocity.createTestField = parts.createTestField;
-    L.easyVelocity.gfsUrl = parts.gfsUrl;
-    L.easyVelocity.gfsForecast = parts.gfsForecast;
-    L.easyVelocity.gfsAnalyses = parts.gfsAnalyses;
-    L.easyVelocity.gefsMeanUrl = parts.gefsMeanUrl;
-    L.easyVelocity.gefsMeanForecast = parts.gefsMeanForecast;
     L.easyVelocity.timeList = parts.timeList;
+    L.easyVelocity.isNetcdfUrl = parts.isNetcdfUrl;
+    L.easyVelocity.netcdfTimes = parts.netcdfTimes;
     L.easyVelocity.defaultColorScale = parts.defaultColorScale;
     L.easyVelocity.speedUnits = parts.speedUnits;
     L.easyVelocity.installTimeDimension = parts.installTimeDimension;
@@ -379,11 +374,6 @@
     L.windField.Grib2 = L.easyVelocity.Grib2;
     L.windField.NetCDF = L.easyVelocity.NetCDF;
     L.windField.createTestField = L.easyVelocity.createTestField;
-    L.windField.gfsUrl = L.easyVelocity.gfsUrl;
-    L.windField.gfsForecast = L.easyVelocity.gfsForecast;
-    L.windField.gfsAnalyses = L.easyVelocity.gfsAnalyses;
-    L.windField.gefsMeanUrl = L.easyVelocity.gefsMeanUrl;
-    L.windField.gefsMeanForecast = L.easyVelocity.gefsMeanForecast;
     L.windField.timeList = L.easyVelocity.timeList;
     L.windField.defaultColorScale = L.easyVelocity.defaultColorScale;
     L.windField.installTimeDimension = L.easyVelocity.installTimeDimension;

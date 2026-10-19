@@ -26,13 +26,15 @@
         (function () {
             // Same order as tools/build-dist.js
             var files = ["grib2-unpack", "grib2-reader", "netcdf-reader", "netcdf4-reader", "velocity-data", "test-field", "grib-loader",
-                "netcdf-loader", "time-sources", "gfs", "frame-cache", "speed-field", "particles", "time-dimension", "leaflet.easyvelocity"];
+                "netcdf-loader", "time-sources", "frame-cache", "speed-field", "particles", "time-dimension", "leaflet.easyvelocity"];
             var tags = new URLSearchParams(location.search).has("dist")
                 ? ['<script src="../dist/leaflet.easyvelocity.js"><\/script>']
                 : files.map(function (f) { return '<script src="../src/' + f + '.js"><\/script>'; });
             document.write(tags.join(""));
         })();
     </script>
+    <!-- NOAA GFS/GEFS URL helpers for the demo's live sources -->
+    <script src="noaa.js"></script>
 
     <style>
         html, body { height: 100%; margin: 0; font: 13px/1.4 system-ui, sans-serif; }
@@ -185,10 +187,10 @@
         const colors = { surface: L.easyVelocity.defaultColorScale, mid: scaledColors(1.5), jet: scaledColors(3) };
 
         const NOAA = "Wind data: NOAA/NCEP";
-        const gfs10 = L.easyVelocity.gfsForecast({ from: 0, to: 48, step: 3 });
-        const gfsPast = L.easyVelocity.gfsAnalyses({ cycles: 8 });
-        const gfsCoarse = L.easyVelocity.gfsForecast({ from: 0, to: 120, step: 6, resolution: "1p00" });
-        const gefs = L.easyVelocity.gefsMeanForecast({ from: 0, to: 120, step: 6 });
+        const gfs10 = noaa.gfsForecast({ from: 0, to: 48, step: 3 });
+        const gfsPast = noaa.gfsAnalyses({ cycles: 8 });
+        const gfsCoarse = noaa.gfsForecast({ from: 0, to: 120, step: 6, resolution: "1p00" });
+        const gefs = noaa.gefsMeanForecast({ from: 0, to: 120, step: 6 });
 
         // Sample files in data/ (see data/NOTICE.txt).
         const ian = L.easyVelocity.timeList(["06", "12", "18"].map((hh) => ({
@@ -367,7 +369,9 @@
         const fmtTime = (ms) => new Date(ms).toLocaleString("en-GB", {
             day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "UTC" }) + " UTC";
         function showSteps() {
-            if (select.value === "custom") { $("steps").textContent = "Single time step"; return; }
+            if (select.value === "custom" && map.timeDimension.getAvailableTimes().length <= 1) {
+                $("steps").textContent = "Single time step"; return;
+            }
             const times = map.timeDimension.getAvailableTimes();
             const i = times.indexOf(map.timeDimension.getCurrentTime());
             $("steps").textContent = (i >= 0 ? "Step " + (i + 1) + " of " : "") + times.length +
@@ -394,6 +398,11 @@
             setStatus(i.validTime
                 ? "Loaded " + i.level + " wind, valid " + fmtTime(Date.parse(i.validTime)) + " (" + i.loadedVia + ")"
                 : "Loaded " + i.name + (e.time != null ? ", " + fmtTime(e.time) : ""));
+            // A single custom file: show its own date on the slider.
+            if (select.value === "custom" && !wind.options.timeSource && i.validTime) {
+                const t = Date.parse(i.validTime);
+                if (map.timeDimension.getAvailableTimes().join() !== String(t)) map.timeDimension.setAvailableTimes([t], "replace");
+            }
         });
         wind.on("error", (e) => setStatus("Error: " + e.message, true));
         wind.on("start stop", () => { $("toggleBtn").textContent = wind.isRunning() ? "Stop particles" : "Start particles"; });
@@ -463,15 +472,46 @@
             $("customRow").hidden = v !== "custom";
             if (v !== "custom") useDataset(v);
         };
-        function loadCustom() {
+        // Time steps in a custom NetCDF file; NetCDF-4 is only recognised after download, then h5wasm is fetched.
+        async function timesInFile(url) {
+            if (!L.easyVelocity.isNetcdfUrl(url)) return [];
+            try {
+                return await L.easyVelocity.netcdfTimes(url);
+            } catch (e) {
+                if (window.h5wasm || !/h5wasm/.test(e.message)) throw e;
+                setStatus("Loading NetCDF-4 support…");
+                await loadScript(H5WASM_URL);
+                return L.easyVelocity.netcdfTimes(url);
+            }
+        }
+
+        let customRequest = 0;
+        async function loadCustom() {
             const url = $("customUrl").value.trim();
-            if (url) {
-                $("note").textContent = "A single file, so the time slider has no effect.";
-                setAttribution(null);
-                wind.setOptions({ source: url, timeSource: null, level: 10, levelType: 103, colorScale: colors.surface });
-                buildLegend();
-                showSteps();
-            } else setStatus("Enter a GRIB2 or NetCDF URL first.", true);
+            if (!url) { setStatus("Enter a GRIB2 or NetCDF URL first.", true); return; }
+            const request = ++customRequest;
+            setAttribution(null);
+            setStatus("Reading the file…");
+            let times;
+            try { times = await timesInFile(url); } catch (e) { setStatus("Error: " + e.message, true); return; }
+            if (request !== customRequest) return;   // another URL was loaded meanwhile
+
+            const options = { level: 10, levelType: 103, colorScale: colors.surface };
+            if (times.length > 1) {
+                const [base, fragment] = url.split("#");
+                const list = L.easyVelocity.timeList(times.map((t) => ({
+                    time: t, source: base + "#" + (fragment ? fragment + "&" : "") + "time=" + new Date(t).toISOString() })));
+                $("note").textContent = times.length + " time steps in this file.";
+                wind.setOptions(Object.assign(options, { source: "", timeSource: list.timeSource }));
+                map.timeDimension.setAvailableTimes(list.times, "replace");
+                map.timeDimension.setCurrentTime(list.times[0]);
+            } else {
+                $("note").textContent = "A single time step.";
+                wind.setOptions(Object.assign(options, { source: url, timeSource: null }));
+                if (times.length === 1) map.timeDimension.setAvailableTimes(times, "replace");
+            }
+            buildLegend();
+            showSteps();
         }
         $("loadBtn").onclick = loadCustom;
         $("customUrl").onkeydown = (e) => { if (e.key === "Enter") loadCustom(); };

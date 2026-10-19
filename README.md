@@ -16,9 +16,13 @@ Load Leaflet, optionally Leaflet.TimeDimension, then the plugin:
 <script src="dist/leaflet.easyvelocity.js"></script>
 <script>
     const map = L.map("map").setView([40, -75], 5);
-    L.easyVelocity({ source: "test" }).addTo(map);
+
+    // Any GRIB2 or NetCDF file with U/V wind (or current) data.
+    L.easyVelocity({ source: "https://example.com/data/wind.grib2" }).addTo(map);
 </script>
 ```
+
+The source can be any URL the browser is allowed to fetch, for example `"data/wind.grib2"` or `"https://example.com/currents.nc"`. Use `source: "test"` for a generated sample field that needs no download.
 
 `L.EasyVelocity` is the class behind `L.easyVelocity()`. The older names `L.windField`, `L.timeDimension.layer.windField` and `WindData` still work.
 
@@ -34,7 +38,7 @@ Add `?dist` to the URL to load the built file instead of the separate source fil
 
 ```js
 const layer = L.easyVelocity({
-    source: "test",                    // or a GRIB2 / NetCDF URL, e.g. L.easyVelocity.gfsUrl()
+    source: "https://.../wind.grib2",  // GRIB2 or NetCDF URL, or "test" for generated sample data
     format: "auto",                    // "auto" (NetCDF for .nc URLs, else GRIB2), "grib2" or "netcdf"
     particleCount: 4000,
     particleSpeed: 1.0,
@@ -75,6 +79,7 @@ L.easyVelocity({ source: "https://.../currents.nc#u=water_u&v=water_v" });     /
 
 - The `#...` part isn't sent to the server; it just says what to read from the file. Without `#time`, the first time step is shown.
 - A file with several time steps is downloaded once and reused for each of them.
+- `L.easyVelocity.netcdfTimes(url)` returns a promise of the file's time steps (ms), handy for filling a time slider.
 - U and V are found by their CF `standard_name` (`eastward_wind`, `northward_wind`, sea-water velocity, ...) or by common names such as `ugrd10m`, `u10`, `UGRD_10maboveground`, `water_u` or `uo`. If nothing matches, the error lists what the file contains.
 - The grid must be regular latitude/longitude, with those as the last two dimensions. A height or pressure dimension is matched against `level`.
 - `scale_factor`, `add_offset`, `_FillValue` and `missing_value` are applied.
@@ -94,27 +99,32 @@ h5wasm is a separate library under the NIST and HDF5 (BSD-style) licences and is
 Load [Leaflet.TimeDimension](https://github.com/socib/Leaflet.TimeDimension) (and `iso8601-js-period`) before the plugin, give the layer a `timeSource`, and add it through the wrapper instead of `addTo(map)`:
 
 ```js
-const gfs = L.easyVelocity.gfsForecast({ from: 0, to: 48, step: 3 });   // latest GFS run, 0-48 h
+// One file per time step; any list of dated URLs works.
+const forecast = L.easyVelocity.timeList([
+    { time: "2026-10-18T00:00:00Z", source: "https://example.com/data/wind-00z.grib2" },
+    { time: "2026-10-18T06:00:00Z", source: "https://example.com/data/wind-06z.grib2" },
+    { time: "2026-10-18T12:00:00Z", source: "https://example.com/data/wind-12z.grib2" }
+]);
 
 const map = L.map("map", {
     timeDimension: true,
-    timeDimensionOptions: { times: gfs.times, currentTime: gfs.times[0], loadingTimeout: 10000 },
+    timeDimensionOptions: { times: forecast.times, currentTime: forecast.times[0], loadingTimeout: 10000 },
     timeDimensionControl: true
 });
 
-const layer = L.easyVelocity({ timeSource: gfs.timeSource });   // (timeMs) => URL, "test" or VelocityData
+const layer = L.easyVelocity({ timeSource: forecast.timeSource });   // (timeMs) => URL, "test" or VelocityData
 L.timeDimension.layer.easyVelocity(layer).addTo(map);
 ```
 
 - `layer.setTime(ms)`, `prefetchTime` and `isTimeReady` also work without TimeDimension.
 - Decoded frames are kept in memory (`cacheFrames`, default 6, and more while they fit in `cacheMemory`, default 200 MB), so a short loop plays back without reloading. Particles keep flowing from one frame to the next.
-- `timeList([{ time, source }])` turns any list of dated files into `{ times, timeSource }`.
+- `timeSource` can also be your own function, e.g. one that builds the URL for each time.
 - TimeDimension's default `loadingTimeout` is 3 seconds; raise it for large downloads.
 - To switch data, call `layer.setOptions({ timeSource })` and then `map.timeDimension.setAvailableTimes(times, "replace")`.
 
 ## Demo data
 
-The Source list is built from the `datasets` object in `examples/index.html`; add an entry there to add a source.
+The Source list is built from the `datasets` object in `examples/index.html`; add an entry there to add a source. The URLs for NOAA's live GFS and GEFS runs are built by `examples/noaa.js`, a small demo helper that isn't part of the plugin.
 
 | Format | Source | Notes |
 |---|---|---|
@@ -155,13 +165,12 @@ src/
   grib-loader.js        loading GRIB2 from a URL; picks the format
   netcdf-loader.js      loading NetCDF from a URL
   time-sources.js       time lists for the slider
-  gfs.js                NOAA GFS / GEFS URL helpers
   frame-cache.js        per-time-step loading and caching
   speed-field.js        color scale and speed map
   particles.js          particle animation
   time-dimension.js     Leaflet.TimeDimension integration
   leaflet.easyvelocity.js   the layer itself (load last)
-examples/               demo page and sample data
+examples/               demo page, NOAA URL helpers (noaa.js) and sample data
 tools/
   build-dist.js         rebuilds dist/
   grib2-to-netcdf.js    converts GRIB2 wind files to NetCDF

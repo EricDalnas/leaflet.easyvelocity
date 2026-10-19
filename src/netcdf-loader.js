@@ -217,7 +217,7 @@
                 if (times) validTime = times[best];
             } else if (dim.size === 1) {
                 index.push(0);
-                if (values) level = values[0] + " " + attr(cv, "units");
+                if (values && attr(cv, "units")) level = values[0] + " " + attr(cv, "units");
             } else if (values) {
                 // A vertical axis: find the requested level. Pressure may be stored in Pa or hPa.
                 const targets = options.levelType === 100 ? [options.level, options.level * 100] : [options.level];
@@ -299,7 +299,32 @@
     /** Should this source be read as NetCDF? */
     function isNetcdfUrl(url) {
         const path = url.split(/[?#]/)[0];
-        return /\.(nc|nc3|cdf|netcdf)$/i.test(path) || /[?&](accept|format)=netcdf/i.test(url);
+        return /\.(nc|nc3|nc4|cdf|netcdf)$/i.test(path) || /[?&](accept|format)=netcdf/i.test(url);
+    }
+
+    function splitSource(source) {
+        const hash = source.indexOf("#");
+        return {
+            url: hash < 0 ? source : source.slice(0, hash),
+            params: new URLSearchParams(hash < 0 ? "" : source.slice(hash + 1))
+        };
+    }
+
+    /**
+     * The time steps (ms since 1970) of the U/V data in a NetCDF file, e.g. to fill a time slider.
+     * Empty if the file has no time axis. The download is kept, so loading those steps afterwards is instant.
+     */
+    async function netcdfTimes(source, options) {
+        options = Object.assign({ level: 10, levelType: 103 }, options);
+        const { url, params } = splitSource(source);
+        const file = await getFile(url, options);
+        const { u } = findVelocity(file, params, options);
+        for (const d of u.dims.slice(0, -2)) {
+            const cv = coordinate(file, d);
+            const decode = cv && isTimeAxis(file, d, cv) && cfTimeDecoder(attr(cv, "units"));
+            if (decode) return Array.from(parts.netcdf.readVariable(file, cv), decode);
+        }
+        return [];
     }
 
     /**
@@ -308,9 +333,7 @@
      * @returns {Promise<VelocityData>}
      */
     async function loadNetcdf(source, options) {
-        const hash = source.indexOf("#");
-        const url = hash < 0 ? source : source.slice(0, hash);
-        const params = new URLSearchParams(hash < 0 ? "" : source.slice(hash + 1));
+        const { url, params } = splitSource(source);
         const timeText = params.get("time");
         const wantedTime = timeText === null ? null : +new Date(/^-?\d+$/.test(timeText) ? +timeText : timeText);
         if (wantedTime !== null && isNaN(wantedTime)) throw new Error("NetCDF: cannot read #time=" + timeText);
@@ -331,7 +354,8 @@
             info: {
                 name: "NetCDF " + u.name + "/" + v.name,
                 units: attr(u, "units") || "m/s",
-                level: chosen.level || attr(u, "level") || (known && known[2]) || u.name + "/" + v.name,
+                level: chosen.level || attr(u, "level") || (known && known[2]) ||
+                    (/@\s*(.+)$/.exec(attr(u, "long_name")) || [])[1] || u.name + "/" + v.name,   // GRIB-style "u-component of wind @ <level>"
                 validTime: chosen.validTime === null ? undefined : new Date(chosen.validTime).toISOString(),
                 loadedVia: { 1: "NetCDF classic", 2: "NetCDF 64-bit offset", 4: "NetCDF-4" }[file.version] || "NetCDF CDF-5"
             }
@@ -339,5 +363,6 @@
     }
 
     parts.isNetcdfUrl = isNetcdfUrl;
+    parts.netcdfTimes = netcdfTimes;
     parts.loadNetcdf = loadNetcdf;
 })(globalThis);

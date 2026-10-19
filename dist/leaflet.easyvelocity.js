@@ -1918,7 +1918,7 @@
                 if (times) validTime = times[best];
             } else if (dim.size === 1) {
                 index.push(0);
-                if (values) level = values[0] + " " + attr(cv, "units");
+                if (values && attr(cv, "units")) level = values[0] + " " + attr(cv, "units");
             } else if (values) {
                 // A vertical axis: find the requested level. Pressure may be stored in Pa or hPa.
                 const targets = options.levelType === 100 ? [options.level, options.level * 100] : [options.level];
@@ -2000,7 +2000,32 @@
     /** Should this source be read as NetCDF? */
     function isNetcdfUrl(url) {
         const path = url.split(/[?#]/)[0];
-        return /\.(nc|nc3|cdf|netcdf)$/i.test(path) || /[?&](accept|format)=netcdf/i.test(url);
+        return /\.(nc|nc3|nc4|cdf|netcdf)$/i.test(path) || /[?&](accept|format)=netcdf/i.test(url);
+    }
+
+    function splitSource(source) {
+        const hash = source.indexOf("#");
+        return {
+            url: hash < 0 ? source : source.slice(0, hash),
+            params: new URLSearchParams(hash < 0 ? "" : source.slice(hash + 1))
+        };
+    }
+
+    /**
+     * The time steps (ms since 1970) of the U/V data in a NetCDF file, e.g. to fill a time slider.
+     * Empty if the file has no time axis. The download is kept, so loading those steps afterwards is instant.
+     */
+    async function netcdfTimes(source, options) {
+        options = Object.assign({ level: 10, levelType: 103 }, options);
+        const { url, params } = splitSource(source);
+        const file = await getFile(url, options);
+        const { u } = findVelocity(file, params, options);
+        for (const d of u.dims.slice(0, -2)) {
+            const cv = coordinate(file, d);
+            const decode = cv && isTimeAxis(file, d, cv) && cfTimeDecoder(attr(cv, "units"));
+            if (decode) return Array.from(parts.netcdf.readVariable(file, cv), decode);
+        }
+        return [];
     }
 
     /**
@@ -2009,9 +2034,7 @@
      * @returns {Promise<VelocityData>}
      */
     async function loadNetcdf(source, options) {
-        const hash = source.indexOf("#");
-        const url = hash < 0 ? source : source.slice(0, hash);
-        const params = new URLSearchParams(hash < 0 ? "" : source.slice(hash + 1));
+        const { url, params } = splitSource(source);
         const timeText = params.get("time");
         const wantedTime = timeText === null ? null : +new Date(/^-?\d+$/.test(timeText) ? +timeText : timeText);
         if (wantedTime !== null && isNaN(wantedTime)) throw new Error("NetCDF: cannot read #time=" + timeText);
@@ -2032,7 +2055,8 @@
             info: {
                 name: "NetCDF " + u.name + "/" + v.name,
                 units: attr(u, "units") || "m/s",
-                level: chosen.level || attr(u, "level") || (known && known[2]) || u.name + "/" + v.name,
+                level: chosen.level || attr(u, "level") || (known && known[2]) ||
+                    (/@\s*(.+)$/.exec(attr(u, "long_name")) || [])[1] || u.name + "/" + v.name,   // GRIB-style "u-component of wind @ <level>"
                 validTime: chosen.validTime === null ? undefined : new Date(chosen.validTime).toISOString(),
                 loadedVia: { 1: "NetCDF classic", 2: "NetCDF 64-bit offset", 4: "NetCDF-4" }[file.version] || "NetCDF CDF-5"
             }
@@ -2040,6 +2064,7 @@
     }
 
     parts.isNetcdfUrl = isNetcdfUrl;
+    parts.netcdfTimes = netcdfTimes;
     parts.loadNetcdf = loadNetcdf;
 })(globalThis);
 
@@ -2090,165 +2115,6 @@
     }
 
     parts.timeList = timeList;
-})(globalThis);
-
-/* ===== src/gfs.js ===== */
-/*
- * gfs.js — helpers for NOAA's GFS weather model on the public AWS bucket
- * =======================================================================
- *
- * Part of leaflet.easyvelocity. Pure JavaScript, no dependencies.
- *
- * GFS (Global Forecast System) is NOAA's global weather model. It is run four times a day, at
- * 00, 06, 12 and 18 UTC; each run is called a CYCLE. Each cycle produces forecasts for many
- * hours ahead, one file per forecast hour: "f000" is the analysis (the model's picture of
- * "now"), "f003" is 3 hours later, and so on. Hourly steps up to f120, then every 3 hours.
- *
- * NOAA mirrors all of this in a public Amazon S3 bucket:
- *   https://noaa-gfs-bdp-pds.s3.amazonaws.com/gfs.YYYYMMDD/HH/atmos/gfs.tHHz.pgrb2.0p25.fFFF
- *                                                  date      cycle          cycle  resolution  forecast hour
- * ("pgrb2" = the main parameter file in GRIB2, "0p25" = 0.25 degree grid.) The bucket allows
- * browser access (CORS) including Range requests, which is why we use it. Each file has a
- * companion ".idx" text file, see grib-loader.js.
- *
- * A cycle only appears several hours after its nominal time (the model has to run first), so
- * "latest cycle" below means "the newest one that is probably already published".
- *
- * ALSO HERE: GEFS, NOAA's ensemble (30 slightly perturbed GFS runs). We use its ENSEMBLE MEAN,
- * the average of all members, which is a smoother forecast on a 0.5 degree grid, on the sibling
- * bucket noaa-gefs-pds. Same file layout, same .idx files, same decoder.
- *
- * DATA LICENSE: NOAA data from these buckets are open to the public. NOAA asks for attribution
- * when the data are shown unaltered, and that you do not imply NOAA endorses your product.
- *
- * Everything below builds on the "time list" helper in time-sources.js.
- */
-(function (root) {
-    "use strict";
-
-    const parts = (root.EasyVelocityParts = root.EasyVelocityParts || {});
-
-    const HOUR_MS = 3600e3;
-
-    /**
-     * Start (UTC) of the 6-hourly GFS cycle that contains `date`.
-     * With no argument: the latest cycle that is likely published (now minus 5 hours, floored to 00/06/12/18).
-     */
-    function gfsCycle(date) {
-        const t = date ? new Date(date) : new Date(Date.now() - 5 * HOUR_MS);
-        t.setUTCMinutes(0, 0, 0);
-        t.setUTCHours(Math.floor(t.getUTCHours() / 6) * 6);
-        return t;
-    }
-
-    /**
-     * URL of one GFS file.
-     * @param {object} [opts]
-     * @param {Date|number|string} [opts.date]  picks the cycle (default: latest)
-     * @param {number} [opts.forecastHour]      0 = analysis, 3 = three hours ahead, ... (default 0)
-     * @param {string} [opts.resolution]        "0p25" (default), "0p50" or "1p00"
-     */
-    function gfsUrl(opts) {
-        opts = opts || {};
-        const resolution = opts.resolution || "0p25";
-        const forecastHour = String(opts.forecastHour || 0).padStart(3, "0");   // 3 -> "003"
-        const cycle = gfsCycle(opts.date);
-        const ymd = cycle.getUTCFullYear() +
-            String(cycle.getUTCMonth() + 1).padStart(2, "0") +
-            String(cycle.getUTCDate()).padStart(2, "0");
-        const hh = String(cycle.getUTCHours()).padStart(2, "0");
-        return "https://noaa-gfs-bdp-pds.s3.amazonaws.com/gfs." + ymd + "/" + hh + "/atmos/gfs.t" + hh +
-            "z.pgrb2." + resolution + ".f" + forecastHour;
-    }
-
-    /**
-     * URL of one GEFS ensemble-MEAN file (0.5 degree grid). Options as for gfsUrl, without resolution.
-     */
-    function gefsMeanUrl(opts) {
-        opts = opts || {};
-        const forecastHour = String(opts.forecastHour || 0).padStart(3, "0");
-        const cycle = gfsCycle(opts.date);
-        const ymd = cycle.getUTCFullYear() +
-            String(cycle.getUTCMonth() + 1).padStart(2, "0") +
-            String(cycle.getUTCDate()).padStart(2, "0");
-        const hh = String(cycle.getUTCHours()).padStart(2, "0");
-        return "https://noaa-gefs-pds.s3.amazonaws.com/gefs." + ymd + "/" + hh + "/atmos/pgrb2ap5/geavg.t" + hh +
-            "z.pgrb2a.0p50.f" + forecastHour;
-    }
-
-    /**
-     * Shared by gfsForecast and gefsMeanForecast: one entry per forecast hour of one cycle.
-     * `urlFor(cycleMs, forecastHour)` builds the URL of a step.
-     */
-    function forecastSteps(opts, urlFor) {
-        opts = opts || {};
-        const from = opts.from || 0;
-        const to = opts.to == null ? 48 : opts.to;
-        const step = opts.step || 3;
-        const cycle = gfsCycle(opts.cycle).getTime();
-
-        const hours = [];
-        for (let h = from; h <= to; h += step) hours.push(h);
-
-        const list = parts.timeList(hours.map((h) => ({ time: cycle + h * HOUR_MS, source: urlFor(cycle, h) })));
-        return { cycle: new Date(cycle), hours, times: list.times, timeSource: list.timeSource };
-    }
-
-    /**
-     * Everything needed to animate one forecast cycle with a time slider:
-     *
-     *   const f = L.easyVelocity.gfsForecast({ from: 0, to: 48, step: 3 });
-     *   f.times        valid times in milliseconds, one per step (give these to TimeDimension)
-     *   f.timeSource   function(timeMs) -> URL of the file for that time (give to L.easyVelocity)
-     *
-     * Times between steps snap to the nearest available step, so the slider can never request a
-     * file that does not exist.
-     *
-     * @param {object} [opts]
-     * @param {number} [opts.from=0]    first forecast hour
-     * @param {number} [opts.to=48]     last forecast hour
-     * @param {number} [opts.step=3]    hours between steps
-     * @param {Date|number|string} [opts.cycle]  which cycle (default: latest)
-     * @param {string} [opts.resolution]  "0p25" (default), "0p50" or "1p00"
-     */
-    function gfsForecast(opts) {
-        const resolution = opts && opts.resolution;
-        return forecastSteps(opts, (cycle, h) => gfsUrl({ date: cycle, forecastHour: h, resolution }));
-    }
-
-    /** Same as gfsForecast, for the GEFS ensemble mean (0.5 degrees, 3-hourly to 10 days). */
-    function gefsMeanForecast(opts) {
-        return forecastSteps(opts, (cycle, h) => gefsMeanUrl({ date: cycle, forecastHour: h }));
-    }
-
-    /**
-     * The recent PAST: the analyses (forecast hour 0, the model's best picture of "now") of the
-     * last `cycles` 6-hourly cycles, oldest first. Because it is computed from the clock it
-     * always shows the latest couple of days.
-     *
-     * @param {object} [opts]
-     * @param {number} [opts.cycles=8]  how many cycles back (8 = two days)
-     * @param {string} [opts.resolution]
-     * @returns {{times: number[], timeSource: function}}
-     */
-    function gfsAnalyses(opts) {
-        opts = opts || {};
-        const count = opts.cycles || 8;
-        const latest = gfsCycle(opts.cycle).getTime();
-        const entries = [];
-        for (let i = count - 1; i >= 0; i--) {
-            const cycle = latest - i * 6 * HOUR_MS;
-            entries.push({ time: cycle, source: gfsUrl({ date: cycle, forecastHour: 0, resolution: opts.resolution }) });
-        }
-        return parts.timeList(entries);
-    }
-
-    parts.gfsCycle = gfsCycle;
-    parts.gfsUrl = gfsUrl;
-    parts.gfsForecast = gfsForecast;
-    parts.gefsMeanUrl = gefsMeanUrl;
-    parts.gefsMeanForecast = gefsMeanForecast;
-    parts.gfsAnalyses = gfsAnalyses;
 })(globalThis);
 
 /* ===== src/frame-cache.js ===== */
@@ -3132,7 +2998,6 @@
  *    src/grib-loader.js    URL -> VelocityData (index + Range requests, or streaming); loadSource()
  *    src/netcdf-loader.js  NetCDF URL -> VelocityData (finds the U/V variables, time and level)
  *    src/time-sources.js   list of (time, source) pairs -> times + timeSource for a time slider
- *    src/gfs.js            NOAA GFS / GEFS URL and forecast-time helpers
  *
  *  LAYER SIDE: drawing. Mixins that become methods of the layer defined in THIS file.
  *    src/frame-cache.js    loading + caching one VelocityData per time step, setTime()
@@ -3172,7 +3037,6 @@
         "src/netcdf4-reader.js": "netcdf4",
         "src/velocity-data.js": "VelocityData", "src/test-field.js": "createTestField", "src/grib-loader.js": "loadSource",
         "src/netcdf-loader.js": "loadNetcdf", "src/time-sources.js": "timeList",
-        "src/gfs.js": "gfsUrl",
         "src/frame-cache.js": "frameLoading", "src/speed-field.js": "speedField", "src/particles.js": "particles",
         "src/time-dimension.js": "installTimeDimension"
     };
@@ -3472,12 +3336,9 @@
     L.easyVelocity.Grib2 = parts.grib2;
     L.easyVelocity.NetCDF = parts.netcdf;
     L.easyVelocity.createTestField = parts.createTestField;
-    L.easyVelocity.gfsUrl = parts.gfsUrl;
-    L.easyVelocity.gfsForecast = parts.gfsForecast;
-    L.easyVelocity.gfsAnalyses = parts.gfsAnalyses;
-    L.easyVelocity.gefsMeanUrl = parts.gefsMeanUrl;
-    L.easyVelocity.gefsMeanForecast = parts.gefsMeanForecast;
     L.easyVelocity.timeList = parts.timeList;
+    L.easyVelocity.isNetcdfUrl = parts.isNetcdfUrl;
+    L.easyVelocity.netcdfTimes = parts.netcdfTimes;
     L.easyVelocity.defaultColorScale = parts.defaultColorScale;
     L.easyVelocity.speedUnits = parts.speedUnits;
     L.easyVelocity.installTimeDimension = parts.installTimeDimension;
@@ -3486,11 +3347,6 @@
     L.windField.Grib2 = L.easyVelocity.Grib2;
     L.windField.NetCDF = L.easyVelocity.NetCDF;
     L.windField.createTestField = L.easyVelocity.createTestField;
-    L.windField.gfsUrl = L.easyVelocity.gfsUrl;
-    L.windField.gfsForecast = L.easyVelocity.gfsForecast;
-    L.windField.gfsAnalyses = L.easyVelocity.gfsAnalyses;
-    L.windField.gefsMeanUrl = L.easyVelocity.gefsMeanUrl;
-    L.windField.gefsMeanForecast = L.easyVelocity.gefsMeanForecast;
     L.windField.timeList = L.easyVelocity.timeList;
     L.windField.defaultColorScale = L.easyVelocity.defaultColorScale;
     L.windField.installTimeDimension = L.easyVelocity.installTimeDimension;

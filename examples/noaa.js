@@ -1,37 +1,16 @@
 /*
- * gfs.js — helpers for NOAA's GFS weather model on the public AWS bucket
- * =======================================================================
+ * noaa.js — demo helper: URLs for NOAA's GFS and GEFS models on the public AWS buckets.
+ * Not part of the plugin; any page can build its own URLs and pass them to L.easyVelocity.
  *
- * Part of leaflet.easyvelocity. Pure JavaScript, no dependencies.
- *
- * GFS (Global Forecast System) is NOAA's global weather model. It is run four times a day, at
- * 00, 06, 12 and 18 UTC; each run is called a CYCLE. Each cycle produces forecasts for many
- * hours ahead, one file per forecast hour: "f000" is the analysis (the model's picture of
- * "now"), "f003" is 3 hours later, and so on. Hourly steps up to f120, then every 3 hours.
- *
- * NOAA mirrors all of this in a public Amazon S3 bucket:
+ * GFS runs four times a day (00, 06, 12, 18 UTC), one file per forecast hour:
  *   https://noaa-gfs-bdp-pds.s3.amazonaws.com/gfs.YYYYMMDD/HH/atmos/gfs.tHHz.pgrb2.0p25.fFFF
- *                                                  date      cycle          cycle  resolution  forecast hour
- * ("pgrb2" = the main parameter file in GRIB2, "0p25" = 0.25 degree grid.) The bucket allows
- * browser access (CORS) including Range requests, which is why we use it. Each file has a
- * companion ".idx" text file, see grib-loader.js.
- *
- * A cycle only appears several hours after its nominal time (the model has to run first), so
- * "latest cycle" below means "the newest one that is probably already published".
- *
- * ALSO HERE: GEFS, NOAA's ensemble (30 slightly perturbed GFS runs). We use its ENSEMBLE MEAN,
- * the average of all members, which is a smoother forecast on a 0.5 degree grid, on the sibling
- * bucket noaa-gefs-pds. Same file layout, same .idx files, same decoder.
- *
- * DATA LICENSE: NOAA data from these buckets are open to the public. NOAA asks for attribution
- * when the data are shown unaltered, and that you do not imply NOAA endorses your product.
- *
- * Everything below builds on the "time list" helper in time-sources.js.
+ * A run appears a few hours after its nominal time, so "latest" means now minus 5 hours.
+ * NOAA asks for attribution and no implied endorsement when the data is shown.
  */
-(function (root) {
+(function () {
     "use strict";
 
-    const parts = (root.EasyVelocityParts = root.EasyVelocityParts || {});
+    const timeList = L.easyVelocity.timeList;
 
     const HOUR_MS = 3600e3;
 
@@ -95,14 +74,14 @@
         const hours = [];
         for (let h = from; h <= to; h += step) hours.push(h);
 
-        const list = parts.timeList(hours.map((h) => ({ time: cycle + h * HOUR_MS, source: urlFor(cycle, h) })));
+        const list = timeList(hours.map((h) => ({ time: cycle + h * HOUR_MS, source: urlFor(cycle, h) })));
         return { cycle: new Date(cycle), hours, times: list.times, timeSource: list.timeSource };
     }
 
     /**
      * Everything needed to animate one forecast cycle with a time slider:
      *
-     *   const f = L.easyVelocity.gfsForecast({ from: 0, to: 48, step: 3 });
+     *   const f = noaa.gfsForecast({ from: 0, to: 48, step: 3 });
      *   f.times        valid times in milliseconds, one per step (give these to TimeDimension)
      *   f.timeSource   function(timeMs) -> URL of the file for that time (give to L.easyVelocity)
      *
@@ -145,13 +124,8 @@
             const cycle = latest - i * 6 * HOUR_MS;
             entries.push({ time: cycle, source: gfsUrl({ date: cycle, forecastHour: 0, resolution: opts.resolution }) });
         }
-        return parts.timeList(entries);
+        return timeList(entries);
     }
 
-    parts.gfsCycle = gfsCycle;
-    parts.gfsUrl = gfsUrl;
-    parts.gfsForecast = gfsForecast;
-    parts.gefsMeanUrl = gefsMeanUrl;
-    parts.gefsMeanForecast = gefsMeanForecast;
-    parts.gfsAnalyses = gfsAnalyses;
-})(globalThis);
+    window.noaa = { gfsCycle, gfsUrl, gfsForecast, gfsAnalyses, gefsMeanUrl, gefsMeanForecast };
+})();
