@@ -1,13 +1,13 @@
 /*
- * speed-field.js — the coloured wind-speed background, and the screen-aligned wind grid
- * ======================================================================================
+ * speed-field.js — the coloured speed background, and the screen-aligned velocity grid
+ * ====================================================================================
  *
  * Part of leaflet.easyvelocity. This file is a MIXIN for the L.EasyVelocity layer: its methods are
  * mixed in by leaflet.easyvelocity.js and `this` is the layer. Needs Leaflet.
  *
  * TWO COORDINATE WORLDS
  * ---------------------
- *   geographic   latitude/longitude. The WindData lives here.
+ *   geographic   latitude/longitude. The VelocityData lives here.
  *   canvas       pixels of the layer's own <canvas>, origin at its top-left corner. Drawing,
  *                and the particles' positions, live here.
  *
@@ -16,13 +16,13 @@
  *
  *      for a coarse grid of canvas pixels (every `fieldResolution` px, default 4 px):
  *          convert the pixel to latitude/longitude        <- Leaflet does this
- *          ask WindData for the wind there                 <- bilinear interpolation
+ *          ask VelocityData for the velocity there        <- bilinear interpolation
  *          store it in a small array (this._gu / this._gv, "u" and "v" per grid cell)
  *
- * The result is a "screen grid": a picture of the wind field in canvas pixels. Everything
+ * The result is a "screen grid": a picture of the velocity field in canvas pixels. Everything
  * after that is cheap:
  *   - the colour field is just that grid painted as an image (_drawField), and
- *   - each particle looks up its wind in the same grid (see particles.js).
+ *   - each particle looks up its velocity in the same grid (see particles.js).
  *
  * When does this run? On every moveend / zoom / resize / new data. NOT while dragging (the
  * canvas simply moves with the map pane), and never involving a download.
@@ -32,6 +32,11 @@
  * `colorScale` is a list of [speed in m/s, CSS colour] stops. Speeds in between are blended
  * linearly. For speed we precompute a 256-entry lookup table (LUT) from slowest to fastest, so
  * painting a cell is one array lookup instead of colour maths.
+ *
+ * FADING SLOW SPEEDS
+ * ------------------
+ * With `fadeBelow` (m/s) > 0, each LUT entry also gets an opacity: 0 at rest, rising smoothly to
+ * full at `fadeBelow`. Calm areas then let the base map show through and strong flow stands out.
  */
 (function (root) {
     "use strict";
@@ -44,6 +49,9 @@
         [0, "#264b96"], [3, "#2f8ed1"], [6, "#2fc2a8"], [9, "#6fd05c"], [12, "#d3df3a"],
         [16, "#f7b52c"], [20, "#f26b21"], [25, "#d62839"], [32, "#8a1c7c"]
     ];
+
+    // Display units: how many of each make 1 m/s. Data, colorScale and fadeBelow always stay in m/s.
+    parts.speedUnits = { "m/s": 1, "kt": 1.943844, "mph": 2.236936, "km/h": 3.6 };
 
     /**
      * Turn [[value, cssColor], ...] into [{value, color, r, g, b}, ...] sorted by value.
@@ -66,18 +74,30 @@
 
     parts.speedField = {
 
-        /** The colour scale, for building a legend: { units, min, max, stops: [{value, color}] }. */
+        /**
+         * The colour scale for building a legend, in the `units` option's unit:
+         * { units, factor, min, max, fadeBelow, stops: [{value, color}] }. `factor` converts m/s to `units`.
+         */
         getLegend: function () {
             const stops = this._stops;
+            const units = this.options.units in parts.speedUnits ? this.options.units : "m/s";
+            const factor = parts.speedUnits[units];
             return {
-                units: "m/s",
-                min: stops[0].value,
-                max: stops[stops.length - 1].value,
-                stops: stops.map((s) => ({ value: s.value, color: s.color }))
+                units,
+                factor,
+                min: stops[0].value * factor,
+                max: stops[stops.length - 1].value * factor,
+                fadeBelow: Math.max(0, this.options.fadeBelow || 0) * factor,
+                stops: stops.map((s) => ({ value: s.value * factor, color: s.color }))
             };
         },
 
-        /** Build the 256-colour lookup table from the `colorScale` option. */
+        /** Speed in m/s -> the `units` option's unit. */
+        toDisplaySpeed: function (metresPerSecond) {
+            return metresPerSecond * (parts.speedUnits[this.options.units] || 1);
+        },
+
+        /** Build the 256-entry lookup table from the `colorScale` and `fadeBelow` options. */
         _buildLut: function () {
             const scale = this.options.colorScale && this.options.colorScale.length > 1
                 ? this.options.colorScale
@@ -87,7 +107,8 @@
             const max = stops[stops.length - 1].value;
             this._lutScale = 255 / Math.max(1e-9, max - min);   // speed -> LUT index multiplier
 
-            const lut = this._lut = new Uint8ClampedArray(256 * 3);   // r, g, b per entry
+            const fade = Math.max(0, this.options.fadeBelow || 0);
+            const lut = this._lut = new Uint8ClampedArray(256 * 4);   // r, g, b, alpha per entry
             let s = 0; // index of the stop at the lower end of the current segment
             for (let i = 0; i < 256; i++) {
                 const speed = min + (i / 255) * (max - min);
@@ -96,9 +117,11 @@
                 const b = stops[s + 1];
                 // How far between the two stops are we? 0..1
                 const t = b.value === a.value ? 0 : Math.min(1, Math.max(0, (speed - a.value) / (b.value - a.value)));
-                lut[i * 3] = a.r + (b.r - a.r) * t;
-                lut[i * 3 + 1] = a.g + (b.g - a.g) * t;
-                lut[i * 3 + 2] = a.b + (b.b - a.b) * t;
+                lut[i * 4] = a.r + (b.r - a.r) * t;
+                lut[i * 4 + 1] = a.g + (b.g - a.g) * t;
+                lut[i * 4 + 2] = a.b + (b.b - a.b) * t;
+                const f = fade > 0 ? Math.min(1, Math.max(0, speed / fade)) : 1;
+                lut[i * 4 + 3] = 255 * f * f * (3 - 2 * f);   // smoothstep: no visible edge where the fade ends
             }
         },
 
@@ -117,7 +140,7 @@
         },
 
         /**
-         * Sample the cached WindData onto the screen grid (see the top of this file), then
+         * Sample the cached VelocityData onto the screen grid (see the top of this file), then
          * repaint the colour field.
          *
          * Grid cell (i, j) corresponds to canvas pixel (i * cell, j * cell), where `cell` is
@@ -233,11 +256,11 @@
                 let index = ((speed - lutMin) * lutScale) | 0;           // speed -> 0..255
                 index = index < 0 ? 0 : index > 255 ? 255 : index;       // clamp
                 const p = k * 4;
-                const c = index * 3;
+                const c = index * 4;
                 rgba[p] = lut[c];
                 rgba[p + 1] = lut[c + 1];
                 rgba[p + 2] = lut[c + 2];
-                rgba[p + 3] = 255;
+                rgba[p + 3] = lut[c + 3];
             }
             smallCtx.putImageData(image, 0, 0);
 

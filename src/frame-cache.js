@@ -1,26 +1,26 @@
 /*
- * frame-cache.js — loading wind data, one "frame" per time step, with a cache
+ * frame-cache.js — loading velocity data, one "frame" per time step, with a cache
  * ============================================================================
  *
  * Part of leaflet.easyvelocity. This file is a MIXIN: a bundle of methods that leaflet.easyvelocity.js
  * mixes into the L.EasyVelocity layer (Leaflet's `includes` feature). Inside these methods
- * `this` is the layer. Needs grib-loader.js and wind-data.js.
+ * `this` is the layer. Needs grib-loader.js and velocity-data.js.
  *
  * VOCABULARY
- *   frame      the wind data (a WindData) for ONE moment in time, like one frame of a film.
+ *   frame      the data (a VelocityData) for ONE moment in time, like one frame of a film.
  *   time       milliseconds since 1970-01-01 UTC (what JavaScript's Date.getTime() returns).
- *   source     where a frame comes from: "test", a GRIB2 URL, or a ready-made WindData.
+ *   source     where a frame comes from: "test", a GRIB2 or NetCDF URL, or a ready-made VelocityData.
  *   timeSource an optional function (timeMs) => source, so each time can have its own file.
  *
  * WHY A CACHE?
  * Downloading and decoding a frame takes up to a second or more. A time slider or play
  * button flips between frames quickly, so we keep the last few decoded frames in memory
- * (option `cacheFrames`) and let callers prefetch the next ones:
+ * (options `cacheFrames` / `cacheMemory`) and let callers prefetch the next ones:
  *
  *      slider moves to 06:00  ->  isTimeReady(06:00)?  ->  yes: show it immediately
  *                                                      ->  no:  prefetchTime(06:00), show when ready
  *
- * Panning and zooming the map NEVER touch this file: the wind data is cached, only the
+ * Panning and zooming the map NEVER touch this file: the data is cached, only the
  * on-screen sampling is redone (see speed-field.js).
  *
  * THE LIFE OF A REQUEST
@@ -69,7 +69,7 @@
             this._time = +time;
             if (this._t0 === null) this._t0 = this._time;   // remember the first time ever shown
             if (!this._isTimeDependent()) return Promise.resolve(false);
-            // keepParticles: the particles keep flowing; only the wind they follow changes.
+            // keepParticles: the particles keep flowing; only the field they follow changes.
             return this._load({ keepParticles: true });
         },
 
@@ -115,14 +115,14 @@
         _frameKey: function (time) {
             const source = this._sourceFor(time);
             if (source === "test") return "test@" + this._hours(time);
-            return source instanceof parts.WindData ? source : String(source);
+            return source instanceof parts.VelocityData ? source : String(source);
         },
 
         // ---- the cache ---------------------------------------------------
 
         /**
          * Find or create the cache entry for `time`:
-         *   { promise: resolves to the WindData, data: the WindData once loaded, abort: AbortController }
+         *   { promise: resolves to the VelocityData, data: the VelocityData once loaded, abort: AbortController }
          * The Map keeps insertion order, and re-inserting on every use makes it an LRU
          * ("least recently used first") list, which _trimFrames relies on.
          */
@@ -141,6 +141,7 @@
             const entry = { data: null, abort: abortController, promise: null };
 
             entry.promise = parts.loadSource(source, {
+                format: o.format,
                 level: o.level,
                 levelType: o.levelType,
                 fetchOptions: o.fetchOptions,
@@ -149,6 +150,7 @@
                 onProgress: (bytes) => this.fire("progress", { source, time, loaded: bytes })
             }).then((data) => {
                 entry.data = data;
+                this._trimFrames();   // its size is known only now
                 return data;
             });
 
@@ -162,13 +164,22 @@
             return entry;
         },
 
-        // Evict the least recently used frames beyond `cacheFrames`, but never the one on screen.
+        /**
+         * Evict least recently used frames, but only while there are more than `cacheFrames` AND they use
+         * more than `cacheMemory` MB, so a whole short sequence stays in memory and loops replay instantly.
+         * Never evicts the frame on screen, and never cancels one still loading: the TimeDimension
+         * player may be waiting for it, and would otherwise stall until its loadingTimeout.
+         */
         _trimFrames: function () {
-            const max = Math.max(2, this.options.cacheFrames);
+            const minFrames = Math.max(2, this.options.cacheFrames);
+            const budget = this.options.cacheMemory * 1048576;
+            const size = (data) => (data.u.byteLength || 0) + (data.v.byteLength || 0);
+            let bytes = 0;
+            for (const entry of this._frames.values()) if (entry.data) bytes += size(entry.data);
             for (const [key, entry] of this._frames) {
-                if (this._frames.size <= max) break;
-                if (entry.data && entry.data === this._data) continue;
-                if (!entry.data) entry.abort.abort();        // still downloading: cancel it
+                if (this._frames.size <= minFrames || bytes <= budget) break;
+                if (!entry.data || entry.data === this._data) continue;
+                bytes -= size(entry.data);
                 this._frames.delete(key);
             }
         },

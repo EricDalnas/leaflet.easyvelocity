@@ -735,26 +735,440 @@
     parts.grib2 = { parseMessage, isGribHeader, messageLength };
 })(globalThis);
 
-/* ===== src/wind-data.js ===== */
+/* ===== src/netcdf-reader.js ===== */
 /*
- * wind-data.js — a wind grid you can ask "what is the wind at this latitude/longitude?"
- * ===================================================================================
+ * netcdf-reader.js — reading a NetCDF "classic" file: its header, attributes and variables
+ * =========================================================================================
+ *
+ * Part of leaflet.easyvelocity. Pure JavaScript: no Leaflet, no DOM, no network.
+ *
+ * WHAT IS NETCDF?
+ * ---------------
+ * NetCDF is the other common file format for gridded weather and ocean data (GRIB2 is the
+ * first). Where GRIB2 is a chain of independent, compressed 2-D messages, a NetCDF file is ONE
+ * self-describing container of N-dimensional arrays:
+ *
+ *   dimensions   named lengths, e.g.   time = 3, latitude = 361, longitude = 720
+ *   variables    named arrays over some dimensions, e.g.
+ *                    float ugrd10m(time, latitude, longitude)      the U wind
+ *                    double latitude(latitude)                     the latitude of each row
+ *                A variable with the same name as its only dimension is a "coordinate variable":
+ *                it says where along that axis each index lies.
+ *   attributes   name = value notes on a variable or on the whole file, e.g.
+ *                    ugrd10m:units = "m s-1"      time:units = "seconds since 1970-01-01"
+ *                Which attributes mean what is agreed in the CF ("Climate and Forecast") conventions.
+ *
+ * THE CLASSIC BINARY LAYOUT (what this file reads)
+ * ------------------------------------------------
+ * Servers such as ERDDAP and THREDDS (and tools like wgrib2 -netcdf) write the "classic" format:
+ *
+ *   "CDF" + version byte          1 = classic, 2 = 64-bit offsets, 5 = 64-bit data (CDF-5)
+ *   number of records
+ *   dimension list                name + length; length 0 marks THE "record" (unlimited) dimension
+ *   global attribute list
+ *   variable list                 name, dimension ids, attributes, data type, and `begin`:
+ *                                 the byte offset where the variable's numbers start
+ *   ... the numbers, uncompressed, big-endian, in row-major order (last dimension fastest)
+ *
+ * Every number in the header is a big-endian 32-bit integer (64-bit for sizes in CDF-5, and for
+ * offsets in CDF-2 and CDF-5). Names and attribute values are padded to a multiple of 4 bytes.
+ *
+ * RECORD VARIABLES. A variable whose FIRST dimension is the record dimension is stored
+ * interleaved: record 0 of every such variable, then record 1 of every such variable, ...
+ * So time step r of variable V is at  V.begin + r * recordSize,  where recordSize is the bytes
+ * of one record of ALL record variables together.
+ *
+ * PACKING. To save space a variable may be stored as small integers plus two attributes:
+ *     real value = stored * scale_factor + add_offset
+ * and a stored value equal to _FillValue (or missing_value) means "no data" (NaN here).
+ *
+ * NETCDF-4 is a different format despite the name (built on HDF5, usually compressed). It is
+ * handled by netcdf4-reader.js, which returns the same shape of object as parse() below.
+ */
+(function (root) {
+    "use strict";
+
+    const parts = (root.EasyVelocityParts = root.EasyVelocityParts || {});
+
+    // Data types: number -> [name, bytes per value]
+    const TYPES = {
+        1: ["byte", 1], 2: ["char", 1], 3: ["short", 2], 4: ["int", 4], 5: ["float", 4], 6: ["double", 8],
+        7: ["ubyte", 1], 8: ["ushort", 2], 9: ["uint", 4], 10: ["int64", 8], 11: ["uint64", 8]  // 7..11: CDF-5 only
+    };
+
+    // Values a writer puts where no data was ever written, when a variable has no _FillValue.
+    const DEFAULT_FILL = {
+        byte: -127, short: -32767, int: -2147483647, float: Math.fround(9.9692099683868690e+36),
+        double: 9.9692099683868690e+36, ubyte: 255, ushort: 65535, uint: 4294967295
+    };
+
+    const TAG_DIMENSION = 0x0A;
+    const TAG_VARIABLE = 0x0B;
+    const TAG_ATTRIBUTE = 0x0C;
+
+    /** "CDF" followed by version 1, 2 or 5. */
+    function isNetcdf(bytes) {
+        return bytes.length >= 4 && bytes[0] === 0x43 && bytes[1] === 0x44 && bytes[2] === 0x46 &&
+            (bytes[3] === 1 || bytes[3] === 2 || bytes[3] === 5);
+    }
+
+    /** "\x89HDF\r\n\x1a\n": the signature of HDF5, i.e. NetCDF-4. */
+    function isHdf5(bytes) {
+        const sig = [0x89, 0x48, 0x44, 0x46, 0x0D, 0x0A, 0x1A, 0x0A];
+        return bytes.length >= 8 && sig.every((b, i) => bytes[i] === b);
+    }
+
+    /** Read one value of type `type` at byte `p`. */
+    function readValue(view, p, type) {
+        switch (type) {
+            case "byte": return view.getInt8(p);
+            case "char": case "ubyte": return view.getUint8(p);
+            case "short": return view.getInt16(p);
+            case "ushort": return view.getUint16(p);
+            case "int": return view.getInt32(p);
+            case "uint": return view.getUint32(p);
+            case "float": return view.getFloat32(p);
+            case "double": return view.getFloat64(p);
+            case "int64": return Number(view.getBigInt64(p));
+            case "uint64": return Number(view.getBigUint64(p));
+        }
+        throw new Error("NetCDF: unknown data type " + type);
+    }
+
+    /**
+     * Parse the header. The data itself is only read on demand (readVariable).
+     *
+     * @param {Uint8Array} bytes  the whole file
+     * @returns {{version, dimensions, attributes, variables, recordSize, numRecords, bytes, view}}
+     *   dimensions  [{ name, size, isRecord }]
+     *   attributes  { name: string | number[] }
+     *   variables   [{ name, dims: [dimension index], shape: [sizes], attributes, type, begin, isRecord }]
+     */
+    function parse(bytes) {
+        if (isHdf5(bytes)) throw new Error("This is a NetCDF-4 (HDF5) file: open it with netcdf4-reader.js.");
+        if (!isNetcdf(bytes)) throw new Error("Not a NetCDF file (it does not start with \"CDF\").");
+
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const version = bytes[3];
+        let p = 4;
+
+        const u32 = () => { const v = view.getUint32(p); p += 4; return v; };
+        const u64 = () => { const v = view.getUint32(p) * 4294967296 + view.getUint32(p + 4); p += 8; return v; };
+        const count = version === 5 ? u64 : u32;          // sizes and list lengths
+        const offset = version === 1 ? u32 : u64;         // byte offsets (`begin`)
+        const pad4 = (n) => (n + 3) & ~3;
+
+        const name = () => {
+            const length = count();
+            const text = new TextDecoder().decode(bytes.subarray(p, p + length));
+            p += pad4(length);
+            return text;
+        };
+
+        // A list starts with a tag and a length; "absent" is written as two zeros.
+        const list = (tag, readItem) => {
+            const t = u32();
+            const n = count();
+            if (t === 0 && n === 0) return [];
+            if (t !== tag) throw new Error("NetCDF: corrupt header near byte " + (p - 8));
+            const items = [];
+            for (let i = 0; i < n; i++) items.push(readItem());
+            return items;
+        };
+
+        const attributes = () => {
+            const result = {};
+            for (const [key, value] of list(TAG_ATTRIBUTE, () => {
+                const key = name();
+                const type = TYPES[u32()];
+                const n = count();
+                if (!type) throw new Error("NetCDF: unknown attribute type in " + key);
+                let value;
+                if (type[0] === "char") {
+                    value = new TextDecoder().decode(bytes.subarray(p, p + n)).replace(/\0+$/, "");
+                } else {
+                    value = [];
+                    for (let i = 0; i < n; i++) value.push(readValue(view, p + i * type[1], type[0]));
+                }
+                p += pad4(n * type[1]);
+                return [key, value];
+            })) result[key] = value;
+            return result;
+        };
+
+        let numRecords = u32();
+        if (version === 5) numRecords = numRecords * 4294967296 + u32();
+        const streaming = numRecords === 0xFFFFFFFF;      // "unknown, count them": rare
+
+        const dimensions = list(TAG_DIMENSION, () => {
+            const dimName = name();
+            const size = count();
+            return { name: dimName, size, isRecord: size === 0 };
+        });
+        const globalAttributes = attributes();
+        const variables = list(TAG_VARIABLE, () => {
+            const varName = name();
+            const nDims = count();
+            const dims = [];
+            for (let i = 0; i < nDims; i++) dims.push(count());
+            const varAttributes = attributes();
+            const type = TYPES[u32()];
+            if (!type) throw new Error("NetCDF: unknown data type in variable " + varName);
+            count();                                      // vsize: recomputed below, it can overflow
+            const begin = offset();
+            return {
+                name: varName, dims, attributes: varAttributes, type: type[0], typeSize: type[1], begin,
+                isRecord: dims.length > 0 && dimensions[dims[0]].isRecord
+            };
+        });
+
+        // Bytes of ONE record of a record variable: the product of its other dimensions.
+        const recordVars = variables.filter((v) => v.isRecord);
+        for (const v of variables) {
+            v.sliceBytes = v.dims.slice(v.isRecord ? 1 : 0).reduce((n, d) => n * dimensions[d].size, v.typeSize);
+        }
+        // Each variable's share of a record is padded to 4 bytes, except when there is only one.
+        const recordSize = recordVars.length === 1 ? recordVars[0].sliceBytes
+            : recordVars.reduce((n, v) => n + pad4(v.sliceBytes), 0);
+
+        if (streaming) {
+            numRecords = recordSize && recordVars.length
+                ? Math.floor((bytes.length - Math.min(...recordVars.map((v) => v.begin))) / recordSize) : 0;
+        }
+        for (const d of dimensions) if (d.isRecord) d.size = numRecords;
+        for (const v of variables) v.shape = v.dims.map((d) => dimensions[d].size);
+
+        return { version, dimensions, attributes: globalAttributes, variables, recordSize, numRecords, bytes, view };
+    }
+
+    /** The variable called `name`, or undefined. */
+    function getVariable(file, name) {
+        return file.variables.find((v) => v.name === name);
+    }
+
+    /**
+     * A function stored value -> real value for `variable`: applies scale_factor / add_offset and
+     * turns _FillValue / missing_value (or the type's default fill) into NaN.
+     */
+    function unpacker(variable) {
+        const a = variable.attributes;
+        const scale = a.scale_factor ? a.scale_factor[0] : 1;
+        const add = a.add_offset ? a.add_offset[0] : 0;
+        const missing = [];
+        if (Array.isArray(a._FillValue)) missing.push(a._FillValue[0]);
+        else if (variable.type in DEFAULT_FILL) missing.push(DEFAULT_FILL[variable.type]);
+        if (Array.isArray(a.missing_value)) missing.push(...a.missing_value);
+        const m0 = missing.length > 0 ? missing[0] : NaN;   // usually the only one: checked without a loop
+        const m1 = missing.length > 1 ? missing[1] : NaN;
+        const more = missing.slice(2);
+        return (raw) => raw !== raw || raw === m0 || raw === m1 || (more.length && more.includes(raw))
+            ? NaN : raw * scale + add;
+    }
+
+    /**
+     * Read (part of) a variable as plain numbers, with packing and missing values applied.
+     *
+     * @param {object} file      from parse() (or netcdf4-reader.js open())
+     * @param {object} variable  one of file.variables
+     * @param {number[]} [index] fixed indices for the FIRST dimensions; the rest is read whole.
+     *        E.g. for u(time, latitude, longitude), [2] reads the 2-D grid of time step 2.
+     * @param {Function} [ArrayType]  Float64Array (default) or Float32Array
+     * @returns {Float64Array|Float32Array}  missing values are NaN
+     */
+    function readVariable(file, variable, index, ArrayType) {
+        if (file.readVariable) return file.readVariable(variable, index, ArrayType);
+        index = index || [];
+        ArrayType = ArrayType || Float64Array;
+        const shape = variable.shape;
+        if (index.length > shape.length) throw new Error("NetCDF: too many indices for " + variable.name);
+        index.forEach((k, d) => {
+            if (!(k >= 0 && k < shape[d])) throw new Error("NetCDF: index " + k + " out of range for " + variable.name);
+        });
+
+        // Elements per step of each dimension ("strides"), counted within one record for record variables.
+        const first = variable.isRecord ? 1 : 0;
+        const stride = new Array(shape.length).fill(1);
+        for (let d = shape.length - 2; d >= first; d--) stride[d] = stride[d + 1] * shape[d + 1];
+
+        // How many values one contiguous run has, and where each run starts.
+        const fixed = Math.max(index.length, first);
+        const runLength = shape.slice(fixed).reduce((n, s) => n * s, 1);
+        let start = 0;
+        for (let d = first; d < index.length; d++) start += index[d] * stride[d];
+        const records = !variable.isRecord ? [0] : index.length ? [index[0]]
+            : Array.from({ length: file.numRecords }, (_, r) => r);
+
+        const unpack = unpacker(variable);
+        const out = new ArrayType(records.length * runLength);
+        const view = file.view;
+        const type = variable.type;
+        const size = variable.typeSize;
+        let k = 0;
+        for (const r of records) {
+            let p = variable.begin + r * (variable.isRecord ? file.recordSize : 0) + start * size;
+            if (p + runLength * size > view.byteLength) throw new Error("NetCDF: file is truncated (" + variable.name + ")");
+            for (let i = 0; i < runLength; i++, p += size) out[k++] = unpack(readValue(view, p, type));
+        }
+        return out;
+    }
+
+    parts.netcdf = { isNetcdf, isHdf5, parse, getVariable, readVariable, unpacker };
+})(globalThis);
+
+/* ===== src/netcdf4-reader.js ===== */
+/*
+ * netcdf4-reader.js — reading NetCDF-4 files through the h5wasm library
+ * ======================================================================
+ *
+ * Part of leaflet.easyvelocity. Pure JavaScript; needs the h5wasm script ONLY for NetCDF-4 files.
+ *
+ * NetCDF-4 is stored as HDF5, a much more complex format than NetCDF classic (compression,
+ * chunking, B-trees, heaps). Instead of re-implementing it, this file uses h5wasm: the official
+ * HDF5 C library compiled to WebAssembly (https://github.com/usnistgov/h5wasm, NIST + HDF5
+ * BSD-style licences, no copyleft). It is NOT part of this plugin; a page that needs NetCDF-4
+ * loads it itself, before or after leaflet.easyvelocity.js:
+ *
+ *   <script src="https://cdn.jsdelivr.net/npm/h5wasm@0.10.3/dist/iife/h5wasm.js"></script>
+ *
+ * HOW NETCDF-4 MAPS ONTO HDF5
+ * ---------------------------
+ *   variable      an HDF5 dataset, its attributes are HDF5 attributes
+ *   dimension     a "dimension scale" dataset (attribute CLASS = "DIMENSION_SCALE"); for a
+ *                 coordinate variable such as `lat` it is the variable itself
+ *   which dims    each variable has the scales "attached" to its axes
+ *
+ * open() turns that into the same { dimensions, variables, attributes } shape that
+ * netcdf-reader.js returns for classic files, so netcdf-loader.js does not need to care.
+ */
+(function (root) {
+    "use strict";
+
+    const parts = (root.EasyVelocityParts = root.EasyVelocityParts || {});
+
+    // Bookkeeping attributes netCDF-C / HDF5 add; not part of the netCDF data model.
+    const HIDDEN = new Set(["CLASS", "NAME", "REFERENCE_LIST", "DIMENSION_LIST", "_Netcdf4Dimid",
+        "_Netcdf4Coordinates", "_NCProperties", "_nc3_strict", "_IsNetcdf4"]);
+    const NO_VARIABLE = "This is a netCDF dimension but not a netCDF variable";
+
+    let fileNumber = 0;
+
+    // h5wasm throws for a missing attribute, so look before reading.
+    const attribute = (object, name) => name in object.attrs ? object.get_attribute(name, true) : undefined;
+
+    function library() {
+        const lib = root.h5wasm;
+        const h5 = lib && (lib.File ? lib : lib.default);
+        if (!h5) {
+            throw new Error("This is a NetCDF-4 (HDF5) file. Reading it needs the h5wasm script on the page: " +
+                "<script src=\"https://cdn.jsdelivr.net/npm/h5wasm@0.10.3/dist/iife/h5wasm.js\"></script>");
+        }
+        return h5;
+    }
+
+    function readAttributes(object) {
+        const result = {};
+        for (const name of Object.keys(object.attrs)) {
+            if (HIDDEN.has(name)) continue;
+            const value = object.get_attribute(name, true);
+            result[name] = typeof value === "string" ? value
+                : Array.isArray(value) ? value.flat(Infinity) : [value];
+        }
+        return result;
+    }
+
+    // HDF5 type -> netCDF type name (only used to know the default fill value).
+    function typeName(meta) {
+        if (meta.type === 1) return meta.size === 8 ? "double" : "float";
+        const names = { 1: ["ubyte", "byte"], 2: ["ushort", "short"], 4: ["uint", "int"], 8: ["uint64", "int64"] }[meta.size];
+        return names ? names[meta.signed ? 1 : 0] : "other";
+    }
+
+    /**
+     * @param {Uint8Array} bytes  the whole file
+     * @returns {Promise<object>} { version: 4, dimensions, attributes, variables, readVariable(), close() }
+     */
+    async function open(bytes) {
+        const h5 = library();
+        const { FS } = await h5.ready;
+        const path = "/easyvelocity-" + (++fileNumber) + ".nc";
+        FS.writeFile(path, bytes);
+        const h5file = new h5.File(path, "r");
+
+        const dimensions = [];
+        const variables = [];
+        const dimByPath = new Map();
+        const datasets = h5file.keys().map((name) => ({ name, d: h5file.get(name) }))
+            .filter((x) => x.d instanceof h5.Dataset);
+
+        // Dimension scales first, so the variables can refer to them.
+        for (const { name, d } of datasets) {
+            if (attribute(d, "CLASS") !== "DIMENSION_SCALE") continue;
+            dimByPath.set("/" + name, dimensions.length);
+            dimensions.push({ name, size: d.shape[0], isRecord: false });
+        }
+        for (const { name, d } of datasets) {
+            const isDimension = dimByPath.has("/" + name);
+            if (isDimension && String(attribute(d, "NAME")).startsWith(NO_VARIABLE)) continue;
+            const shape = d.shape || [];
+            const dims = shape.map((size, i) => {
+                if (isDimension && shape.length === 1) return dimByPath.get("/" + name);
+                const scale = d.get_attached_scales(i)[0];
+                if (scale !== undefined && dimByPath.has(scale)) return dimByPath.get(scale);
+                dimensions.push({ name: name + "_dim" + i, size, isRecord: false });   // axis without a scale
+                return dimensions.length - 1;
+            });
+            variables.push({ name, dims, shape, attributes: readAttributes(d), type: typeName(d.metadata), dataset: d });
+        }
+
+        return {
+            version: 4,
+            dimensions,
+            variables,
+            attributes: readAttributes(h5file),
+
+            /** Same contract as netcdf-reader.js readVariable(). */
+            readVariable(variable, index, ArrayType) {
+                index = index || [];
+                const ranges = variable.shape.map((size, d) => d < index.length ? [index[d], index[d] + 1] : []);
+                const raw = variable.dataset.slice(ranges);
+                const unpack = parts.netcdf.unpacker(variable);
+                const out = new (ArrayType || Float64Array)(raw.length);
+                for (let i = 0; i < raw.length; i++) out[i] = unpack(Number(raw[i]));
+                return out;
+            },
+
+            close() {
+                h5file.close();
+                FS.unlink(path);
+            }
+        };
+    }
+
+    parts.netcdf4 = { open };
+})(globalThis);
+
+/* ===== src/velocity-data.js ===== */
+/*
+ * velocity-data.js — a velocity grid you can ask "what is the flow at this latitude/longitude?"
+ * ==========================================================================================
  *
  * Part of leaflet.easyvelocity. Pure JavaScript: no Leaflet, no DOM, no network.
  *
  * This is the one data structure shared by BOTH halves of the plugin:
- *   - the loaders (grib-loader.js, test-field.js) BUILD a WindData from whatever source they read;
- *   - the Leaflet layer (leaflet.easyvelocity.js and friends) only ever ASKS a WindData for wind vectors.
+ *   - the loaders (grib-loader.js, netcdf-loader.js, test-field.js) BUILD a VelocityData from whatever they read;
+ *   - the Leaflet layer (leaflet.easyvelocity.js and friends) only ever ASKS a VelocityData for vectors.
  * Because of that, the drawing code never needs to know whether the numbers came from a
- * GRIB2 file, a test generator, or something added in the future (e.g. NetCDF).
+ * GRIB2 file, a NetCDF file or a test generator, nor whether they are wind, ocean currents or
+ * any other U/V field.
  *
  * WHAT IS STORED
  * --------------
  * A regular latitude/longitude grid with two values per point, U and V:
- *   u  how fast the air moves towards the EAST  (m/s)   negative = towards the west
- *   v  how fast the air moves towards the NORTH (m/s)   negative = towards the south
- * Wind SPEED is sqrt(u*u + v*v). The direction the wind blows TOWARDS follows from atan2(u, v).
- * (Meteorologists name a wind by where it comes FROM, which is 180 degrees opposite.)
+ *   u  how fast the air / water moves towards the EAST  (m/s)   negative = towards the west
+ *   v  how fast the air / water moves towards the NORTH (m/s)   negative = towards the south
+ * SPEED is sqrt(u*u + v*v). The direction of flow (TOWARDS) follows from atan2(u, v).
+ * (Meteorologists name a wind by where it comes FROM, 180 degrees opposite; oceanographers
+ * name a current by where it goes TO.)
  *
  * Grid point (i, j) is at   longitude = lon0 + i * dx     latitude = lat0 + j * dy
  * and its numbers live at   index = j * ni + i            in the u and v arrays.
@@ -767,7 +1181,7 @@
 
     const parts = (root.EasyVelocityParts = root.EasyVelocityParts || {});
 
-    class WindData {
+    class VelocityData {
         /**
          * @param {object} g
          * @param {number} g.lat0  latitude of the first row
@@ -776,8 +1190,8 @@
          * @param {number} g.dy    latitude step between rows, degrees (negative = southwards)
          * @param {number} g.ni    number of columns
          * @param {number} g.nj    number of rows
-         * @param {Float32Array} g.u  east-ward wind, length ni * nj
-         * @param {Float32Array} g.v  north-ward wind, length ni * nj
+         * @param {Float32Array} g.u  eastward velocity, length ni * nj
+         * @param {Float32Array} g.v  northward velocity, length ni * nj
          * @param {object} [g.info]   free-form description (name, valid time, ...) shown in the UI
          */
         constructor(g) {
@@ -799,7 +1213,7 @@
         }
 
         /**
-         * Bilinear interpolation of the wind at any latitude/longitude.
+         * Bilinear interpolation of the velocity at any latitude/longitude.
          *
          * Allocation-free on purpose: this runs hundreds of thousands of times each time the
          * map moves, so it writes into a caller-supplied array instead of creating an object.
@@ -879,7 +1293,8 @@
         }
     }
 
-    parts.WindData = WindData;
+    parts.VelocityData = VelocityData;
+    parts.WindData = VelocityData;   // old name, kept for compatibility
 })(globalThis);
 
 /* ===== src/test-field.js ===== */
@@ -887,7 +1302,7 @@
  * test-field.js — a synthetic wind field for development
  * =======================================================
  *
- * Part of leaflet.easyvelocity. Pure JavaScript. Needs wind-data.js.
+ * Part of leaflet.easyvelocity. Pure JavaScript. Needs velocity-data.js.
  *
  * Real GRIB2 files are large and need network access (and CORS permission). This generator
  * produces an instantly available, visually obvious wind field so the map, the particles,
@@ -912,7 +1327,7 @@
 
     /**
      * @param {number} [hours]  hours since the first time shown; 0 = initial pattern
-     * @returns {WindData}      global 1-degree grid (360 x 181 points), lat 90..-90, lon -180..179
+     * @returns {VelocityData}  global 1-degree grid (360 x 181 points), lat 90..-90, lon -180..179
      */
     function createTestField(hours) {
         hours = hours || 0;
@@ -961,7 +1376,7 @@
             }
         }
 
-        return new parts.WindData({
+        return new parts.VelocityData({
             lat0: 90, lon0: -180, dx: 1, dy: -1, ni, nj, u, v,
             info: { name: "Synthetic test field", units: "m/s" }
         });
@@ -972,16 +1387,16 @@
 
 /* ===== src/grib-loader.js ===== */
 /*
- * grib-loader.js — getting wind data from a URL into a WindData
- * ==============================================================
+ * grib-loader.js — getting U/V data from a GRIB2 URL into a VelocityData
+ * =======================================================================
  *
  * Part of leaflet.easyvelocity. Pure JavaScript apart from fetch(). Needs grib2-reader.js,
- * wind-data.js and test-field.js.
+ * velocity-data.js and test-field.js; hands NetCDF sources to netcdf-loader.js (see loadSource).
  *
  * THE JOB
  * -------
- *   loadSource("https://.../gfs.t00z.pgrb2.0p25.f000", options)   ->  Promise<WindData>
- *   loadSource("test", options)                                     ->  Promise<WindData>
+ *   loadSource("https://.../gfs.t00z.pgrb2.0p25.f000", options)   ->  Promise<VelocityData>
+ *   loadSource("test", options)                                     ->  Promise<VelocityData>
  *
  * THE PROBLEM
  * -----------
@@ -1185,6 +1600,9 @@
                 while (buffer.length + queuedBytes >= bytesNeeded) {
                     mergeQueueIntoBuffer();
                     if (!parts.grib2.isGribHeader(buffer)) {
+                        if (parts.netcdf && (parts.netcdf.isNetcdf(buffer) || parts.netcdf.isHdf5(buffer))) {
+                            throw new Error("Response is a NetCDF file, not GRIB2: use the layer option format: \"netcdf\".");
+                        }
                         throw new Error("Response is not a GRIB2 file (the URL may return an HTML error page).");
                     }
                     const length = parts.grib2.messageLength(buffer);
@@ -1233,7 +1651,7 @@
         }
 
         const g = pair.u.grid;
-        return new parts.WindData({
+        return new parts.VelocityData({
             lat0: g.lat0, lon0: g.lon0, dx: g.dx, dy: g.dy, ni: g.ni, nj: g.nj,
             u: pair.u.values,
             v: pair.v.values,
@@ -1252,24 +1670,377 @@
     /**
      * The single entry point used by the layer.
      *
-     * @param {string|WindData} source  "test", a GRIB2 URL, or an already built WindData
+     * @param {string|VelocityData} source  "test", a GRIB2 or NetCDF URL, or an already built VelocityData
      * @param {object} options
-     *        level, levelType   which wind to pick (default 10 m above ground = 10, 103)
+     *        format             "auto" (default: NetCDF if the URL looks like it, see netcdf-loader.js),
+     *                           "grib2" or "netcdf"
+     *        level, levelType   which level to pick (default 10 m above ground = 10, 103)
      *        hours              (test source only) hours since the first time shown
      *        signal             AbortSignal to cancel the download
      *        onProgress(bytes)  called while streaming
-     *        fetchOptions       extra fetch() options (e.g. credentials), streaming strategy only
-     * @returns {Promise<WindData>}
+     *        fetchOptions       extra fetch() options (e.g. credentials), streaming / NetCDF download only
+     * @returns {Promise<VelocityData>}
      */
     async function loadSource(source, options) {
-        if (source instanceof parts.WindData) return source;
+        if (source instanceof parts.VelocityData) return source;
         if (typeof source !== "string" || !source.trim()) throw new Error("No data source specified.");
         if (source === "test") return parts.createTestField(options.hours);
-        return loadGrib2(source.trim(), options);
+        const url = source.trim();
+        const format = options.format || "auto";
+        if (format === "netcdf" || (format === "auto" && parts.isNetcdfUrl && parts.isNetcdfUrl(url))) {
+            return parts.loadNetcdf(url, options);
+        }
+        return loadGrib2(url, options);
     }
 
     parts.isAbortError = isAbortError;
+    parts.fetchChecked = fetchChecked;
     parts.loadSource = loadSource;
+})(globalThis);
+
+/* ===== src/netcdf-loader.js ===== */
+/*
+ * netcdf-loader.js — getting U/V data from a NetCDF URL into a VelocityData
+ * =======================================================================
+ *
+ * Part of leaflet.easyvelocity. Pure JavaScript apart from fetch(). Needs netcdf-reader.js,
+ * netcdf4-reader.js (NetCDF-4 files only, plus the h5wasm script), velocity-data.js and grib-loader.js (for fetchChecked; grib-loader's loadSource() calls this file
+ * for NetCDF sources).
+ *
+ * THE JOB
+ * -------
+ *   loadNetcdf("https://.../file.nc", options)                         ->  Promise<VelocityData>
+ *   loadNetcdf("data/storm.nc#time=2022-12-23T12:00:00Z", options)    ->  that time step of the file
+ *
+ * Which URLs are treated as NetCDF: paths ending in .nc / .nc3 / .cdf / .netcdf, URLs asking a
+ * server for NetCDF (e.g. "accept=netcdf"), or any source when the layer has format: "netcdf".
+ *
+ * THE URL FRAGMENT ("#...") SELECTS WHAT TO READ
+ * ----------------------------------------------
+ * A NetCDF file often holds several time steps. The part after "#" is never sent to the server,
+ * so it is used to say which one to show (and, optionally, which variables are U and V):
+ *     file.nc#time=2022-12-23T12:00:00Z          the time step nearest to this time
+ *     file.nc#u=water_u&v=water_v               use these variables
+ * Without #time the first time step is used. The file is downloaded ONCE and kept for the
+ * other time steps (see `files` below). Because each "#time=" URL is a different string, the
+ * layer's frame cache treats every time step as its own frame.
+ *
+ * FINDING U AND V IN THE FILE
+ * ----------------------------
+ * Unlike GRIB2, NetCDF has no fixed numbering of quantities; variables have free names. We look,
+ * in this order, for:
+ *   1. the names given in the URL fragment (#u=...&v=...);
+ *   2. CF "standard_name" attributes: eastward_wind / northward_wind (also sea-water velocity);
+ *   3. well-known names: wgrib2's UGRD_10maboveground, NOAA/ERDDAP's ugrd10m, ERA5's u10, ...;
+ *   4. THREDDS/GRIB-style names: u-component_of_wind_height_above_ground, ...
+ * The last two dimensions must be latitude and longitude on a regular grid. Other dimensions are
+ * fixed at one index: time from #time, height/pressure from the layer's `level` option.
+ */
+(function (root) {
+    "use strict";
+
+    const parts = (root.EasyVelocityParts = root.EasyVelocityParts || {});
+
+    // ------------------------------------------------------------------
+    // Downloading, with one shared download per file
+    // ------------------------------------------------------------------
+
+    // url -> { promise, controller, users, listeners }. Several time steps of one file share one
+    // download; the last two files are kept so that stepping through time does not re-download.
+    const files = new Map();
+    const MAX_FILES = 2;
+
+    function abortError() {
+        const e = new Error("Aborted");
+        e.name = "AbortError";
+        return e;
+    }
+
+    async function download(url, entry, fetchOptions) {
+        const response = await parts.fetchChecked(url, Object.assign({}, fetchOptions, { signal: entry.controller.signal }));
+        let bytes;
+        if (!response.body || !response.body.getReader) {
+            bytes = new Uint8Array(await response.arrayBuffer());
+        } else {
+            const reader = response.body.getReader();
+            const chunks = [];
+            let total = 0;
+            for (; ;) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                chunks.push(value);
+                total += value.length;
+                for (const listener of entry.listeners) listener(total);
+            }
+            bytes = new Uint8Array(total);
+            let offset = 0;
+            for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+        }
+        if (parts.netcdf.isHdf5(bytes)) return parts.netcdf4.open(bytes);
+        if (!parts.netcdf.isNetcdf(bytes)) {
+            throw new Error("Response is not a NetCDF file (the URL may return an HTML error page): " + url);
+        }
+        return parts.netcdf.parse(bytes);
+    }
+
+    /**
+     * The parsed file at `url`, downloading it if needed. Cancelling `options.signal` only
+     * cancels the download when no other caller is still waiting for the same file.
+     */
+    function getFile(url, options) {
+        let shared = files.get(url);
+        if (!shared) {
+            const entry = shared = { controller: new AbortController(), users: 0, listeners: new Set(), promise: null };
+            entry.promise = download(url, entry, options.fetchOptions);
+            entry.promise.catch(() => { if (files.get(url) === entry) files.delete(url); });   // allow a retry
+            files.set(url, entry);
+            while (files.size > MAX_FILES) {
+                const oldest = files.keys().next().value;
+                // NetCDF-4 files hold memory inside h5wasm; close them once current readers have finished.
+                files.get(oldest).promise.then((file) => { if (file.close) setTimeout(() => file.close(), 0); }, () => { });
+                files.delete(oldest);
+            }
+        }
+        const signal = options.signal;
+        if (signal && signal.aborted) return Promise.reject(abortError());
+
+        shared.users++;
+        if (options.onProgress) shared.listeners.add(options.onProgress);
+        return new Promise((resolve, reject) => {
+            let settled = false;
+            const leave = () => {
+                settled = true;
+                shared.users--;
+                if (options.onProgress) shared.listeners.delete(options.onProgress);
+                if (signal) signal.removeEventListener("abort", onAbort);
+            };
+            const onAbort = () => {
+                if (settled) return;
+                leave();
+                if (shared.users === 0) shared.controller.abort();   // nobody else wants this file
+                reject(abortError());
+            };
+            if (signal) signal.addEventListener("abort", onAbort);
+            shared.promise.then(
+                (file) => { if (!settled) { leave(); resolve(file); } },
+                (err) => { if (!settled) { leave(); reject(err); } });
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // Understanding the file: axes, time, level
+    // ------------------------------------------------------------------
+
+    const attr = (v, name) => (v && v.attributes[name]) || "";
+
+    function isLatitude(v) {
+        return !!v && (/^degrees?_?n(orth)?$/i.test(attr(v, "units")) || attr(v, "standard_name") === "latitude" ||
+            /^lat(itude)?$/i.test(v.name));
+    }
+
+    function isLongitude(v) {
+        return !!v && (/^degrees?_?e(ast)?$/i.test(attr(v, "units")) || attr(v, "standard_name") === "longitude" ||
+            /^lon(gitude)?$/i.test(v.name));
+    }
+
+    /** The coordinate variable of dimension `d`: the 1-D variable with the dimension's name. */
+    function coordinate(file, d) {
+        const name = file.dimensions[d].name;
+        return file.variables.find((v) => v.name === name && v.dims.length === 1);
+    }
+
+    /** True if the last two dimensions of `v` are latitude, longitude. */
+    function onLatLonGrid(file, v) {
+        const n = v.dims.length;
+        return n >= 2 && isLatitude(coordinate(file, v.dims[n - 2])) && isLongitude(coordinate(file, v.dims[n - 1]));
+    }
+
+    /** First value and step of an evenly spaced axis; throws for an uneven one. */
+    function regularAxis(values, what) {
+        const n = values.length;
+        if (n < 2) throw new Error("NetCDF: the " + what + " axis needs at least 2 points.");
+        const step = (values[n - 1] - values[0]) / (n - 1);
+        for (let i = 0; i < n; i++) {
+            if (!(Math.abs(values[i] - values[0] - i * step) <= Math.abs(step) * 0.01)) {
+                throw new Error("NetCDF: the " + what + " axis is not evenly spaced; only regular lat/lon grids are supported.");
+            }
+        }
+        return { start: values[0], step };
+    }
+
+    /**
+     * CF time units, e.g. "seconds since 1970-01-01T00:00:00Z" or "hours since 2022-12-23 00:00:00.0 0:00",
+     * as a function value -> milliseconds since 1970. Null if the units are not of this form.
+     */
+    function cfTimeDecoder(units) {
+        const m = /^\s*(\w+)\s+since\s+(\d{1,4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{1,2})(?::(\d{1,2}(?:\.\d*)?))?)?\s*(Z|UTC|[+-]?\d{1,2}(?::?\d{2})?)?\s*$/i
+            .exec(units || "");
+        if (!m) return null;
+        const unit = m[1].toLowerCase();
+        const factor = /^s(ecs?|econds?)?$/.test(unit) ? 1e3 : /^min(s|utes?)?$/.test(unit) ? 6e4
+            : /^(h|hrs?|hours?)$/.test(unit) ? 3.6e6 : /^(d|days?)$/.test(unit) ? 8.64e7 : 0;
+        if (!factor) return null;
+        let epoch = Date.UTC(+m[2], +m[3] - 1, +m[4], +(m[5] || 0), +(m[6] || 0)) + (+(m[7] || 0)) * 1e3;
+        const zone = /^([+-]?)(\d{1,2}):?(\d{2})?$/.exec(m[8] || "");
+        if (zone) epoch -= (zone[1] === "-" ? -1 : 1) * (+zone[2] * 60 + +(zone[3] || 0)) * 6e4;
+        return (value) => epoch + value * factor;
+    }
+
+    function isTimeAxis(file, d, cv) {
+        return file.dimensions[d].isRecord || attr(cv, "axis") === "T" || attr(cv, "standard_name") === "time" ||
+            /\bsince\b/i.test(attr(cv, "units"));
+    }
+
+    /**
+     * Fix every dimension except latitude/longitude at one index.
+     * @returns {{index: number[], validTime: number|null, level: string}}
+     */
+    function chooseIndices(file, v, wantedTime, options) {
+        const index = [];
+        let validTime = null;
+        let level = "";
+        for (let k = 0; k < v.dims.length - 2; k++) {
+            const d = v.dims[k];
+            const dim = file.dimensions[d];
+            const cv = coordinate(file, d);
+            const values = cv ? parts.netcdf.readVariable(file, cv) : null;
+
+            if (cv && isTimeAxis(file, d, cv)) {
+                const decode = cfTimeDecoder(attr(cv, "units"));
+                const times = decode ? Array.from(values, decode) : null;
+                let best = 0;
+                if (times && wantedTime !== null) {
+                    for (let i = 1; i < times.length; i++) {
+                        if (Math.abs(times[i] - wantedTime) < Math.abs(times[best] - wantedTime)) best = i;
+                    }
+                }
+                index.push(best);
+                if (times) validTime = times[best];
+            } else if (dim.size === 1) {
+                index.push(0);
+                if (values) level = values[0] + " " + attr(cv, "units");
+            } else if (values) {
+                // A vertical axis: find the requested level. Pressure may be stored in Pa or hPa.
+                const targets = options.levelType === 100 ? [options.level, options.level * 100] : [options.level];
+                const i = values.findIndex((x) => targets.some((t) => Math.abs(x - t) <= 1e-6 * Math.max(1, Math.abs(t))));
+                if (i < 0) {
+                    throw new Error("NetCDF: level " + options.level + " not found on axis " + dim.name +
+                        " (" + Array.from(values).join(", ") + " " + attr(cv, "units") + ").");
+                }
+                index.push(i);
+                level = values[i] + " " + attr(cv, "units");
+            } else {
+                throw new Error("NetCDF: cannot choose an index on dimension " + dim.name + " of " + v.name + ".");
+            }
+        }
+        return { index, validTime, level: level.trim() };
+    }
+
+    // ------------------------------------------------------------------
+    // Finding the U and V variables
+    // ------------------------------------------------------------------
+
+    const STANDARD_NAMES = [
+        ["eastward_wind", "northward_wind"],
+        ["x_wind", "y_wind"],
+        ["eastward_sea_water_velocity", "northward_sea_water_velocity"],
+        ["surface_eastward_sea_water_velocity", "surface_northward_sea_water_velocity"]
+    ];
+    // [U name, V name, level they are at]
+    const COMMON_NAMES = [["ugrd10m", "vgrd10m", "10 m above ground"], ["u10", "v10", "10 m above ground"],
+        ["uwnd", "vwnd"], ["water_u", "water_v"], ["uo", "vo"], ["u", "v"], ["U", "V"]];
+
+    function findVelocity(file, params, options) {
+        const grids = file.variables.filter((v) => onLatLonGrid(file, v));
+        const byName = (name) => grids.find((v) => v.name === name);
+        const sameShape = (u, v) => u && v && u.dims.join() === v.dims.join();
+
+        if (params.has("u") || params.has("v")) {
+            const u = byName(params.get("u"));
+            const v = byName(params.get("v"));
+            if (!sameShape(u, v)) throw new Error("NetCDF: variables " + params.get("u") + " / " + params.get("v") +
+                " not found, or not on the same latitude/longitude grid.");
+            return { u, v };
+        }
+
+        for (const [uName, vName] of STANDARD_NAMES) {
+            for (const u of grids.filter((x) => attr(x, "standard_name") === uName)) {
+                const v = grids.find((x) => attr(x, "standard_name") === vName && sameShape(u, x));
+                if (v) return { u, v };
+            }
+        }
+
+        // wgrib2 -netcdf names fields after the GRIB2 inventory: UGRD_10maboveground, UGRD_850mb, ...
+        const levelName = options.levelType === 103 ? options.level + "maboveground"
+            : options.levelType === 100 ? options.level + "mb" : null;
+        const pairs = levelName ? [["UGRD_" + levelName, "VGRD_" + levelName]].concat(COMMON_NAMES) : COMMON_NAMES;
+        for (const [uName, vName] of pairs) {
+            const u = byName(uName);
+            const v = byName(vName);
+            if (sameShape(u, v)) return { u, v };
+        }
+
+        // THREDDS names GRIB fields like "u-component_of_wind_height_above_ground" / "..._isobaric".
+        const preferred = options.levelType === 100 ? "isobaric" : "height_above_ground";
+        const gribStyle = grids.filter((x) => /^u-component_of_wind/.test(x.name))
+            .sort((a, b) => (b.name.includes(preferred) ? 1 : 0) - (a.name.includes(preferred) ? 1 : 0));
+        for (const u of gribStyle) {
+            const v = byName(u.name.replace(/^u-/, "v-"));
+            if (sameShape(u, v)) return { u, v };
+        }
+
+        throw new Error("NetCDF: no U/V velocity variables found. Variables on a lat/lon grid: " +
+            (grids.map((x) => x.name).join(", ") || "none") + ". Name them in the URL, e.g. file.nc#u=NAME&v=NAME");
+    }
+
+    // ------------------------------------------------------------------
+    // Putting it together
+    // ------------------------------------------------------------------
+
+    /** Should this source be read as NetCDF? */
+    function isNetcdfUrl(url) {
+        const path = url.split(/[?#]/)[0];
+        return /\.(nc|nc3|cdf|netcdf)$/i.test(path) || /[?&](accept|format)=netcdf/i.test(url);
+    }
+
+    /**
+     * @param {string} source  a NetCDF URL, optionally with #time=...&u=...&v=...
+     * @param {object} options  as for loadSource() in grib-loader.js
+     * @returns {Promise<VelocityData>}
+     */
+    async function loadNetcdf(source, options) {
+        const hash = source.indexOf("#");
+        const url = hash < 0 ? source : source.slice(0, hash);
+        const params = new URLSearchParams(hash < 0 ? "" : source.slice(hash + 1));
+        const timeText = params.get("time");
+        const wantedTime = timeText === null ? null : +new Date(/^-?\d+$/.test(timeText) ? +timeText : timeText);
+        if (wantedTime !== null && isNaN(wantedTime)) throw new Error("NetCDF: cannot read #time=" + timeText);
+
+        const file = await getFile(url, options);
+        const { u, v } = findVelocity(file, params, options);
+        const n = u.dims.length;
+        const lat = regularAxis(parts.netcdf.readVariable(file, coordinate(file, u.dims[n - 2])), "latitude");
+        const lon = regularAxis(parts.netcdf.readVariable(file, coordinate(file, u.dims[n - 1])), "longitude");
+        const chosen = chooseIndices(file, u, wantedTime, options);
+        const known = COMMON_NAMES.find((pair) => pair[0] === u.name);
+
+        return new parts.VelocityData({
+            lat0: lat.start, dy: lat.step, nj: u.shape[n - 2],
+            lon0: lon.start, dx: lon.step, ni: u.shape[n - 1],
+            u: parts.netcdf.readVariable(file, u, chosen.index, Float32Array),
+            v: parts.netcdf.readVariable(file, v, chosen.index, Float32Array),
+            info: {
+                name: "NetCDF " + u.name + "/" + v.name,
+                units: attr(u, "units") || "m/s",
+                level: chosen.level || attr(u, "level") || (known && known[2]) || u.name + "/" + v.name,
+                validTime: chosen.validTime === null ? undefined : new Date(chosen.validTime).toISOString(),
+                loadedVia: { 1: "NetCDF classic", 2: "NetCDF 64-bit offset", 4: "NetCDF-4" }[file.version] || "NetCDF CDF-5"
+            }
+        });
+    }
+
+    parts.isNetcdfUrl = isNetcdfUrl;
+    parts.loadNetcdf = loadNetcdf;
 })(globalThis);
 
 /* ===== src/time-sources.js ===== */
@@ -1279,7 +2050,7 @@
  *
  * Part of leaflet.easyvelocity. Pure JavaScript, no dependencies.
  *
- * A time slider (see time-dimension.js) deals in TIMES; the wind layer deals in SOURCES
+ * A time slider (see time-dimension.js) deals in TIMES; the velocity layer deals in SOURCES
  * (a file URL for each time step). This tiny helper builds the bridge from a plain list:
  *
  *   const sequence = L.easyVelocity.timeList([
@@ -1482,28 +2253,28 @@
 
 /* ===== src/frame-cache.js ===== */
 /*
- * frame-cache.js — loading wind data, one "frame" per time step, with a cache
+ * frame-cache.js — loading velocity data, one "frame" per time step, with a cache
  * ============================================================================
  *
  * Part of leaflet.easyvelocity. This file is a MIXIN: a bundle of methods that leaflet.easyvelocity.js
  * mixes into the L.EasyVelocity layer (Leaflet's `includes` feature). Inside these methods
- * `this` is the layer. Needs grib-loader.js and wind-data.js.
+ * `this` is the layer. Needs grib-loader.js and velocity-data.js.
  *
  * VOCABULARY
- *   frame      the wind data (a WindData) for ONE moment in time, like one frame of a film.
+ *   frame      the data (a VelocityData) for ONE moment in time, like one frame of a film.
  *   time       milliseconds since 1970-01-01 UTC (what JavaScript's Date.getTime() returns).
- *   source     where a frame comes from: "test", a GRIB2 URL, or a ready-made WindData.
+ *   source     where a frame comes from: "test", a GRIB2 or NetCDF URL, or a ready-made VelocityData.
  *   timeSource an optional function (timeMs) => source, so each time can have its own file.
  *
  * WHY A CACHE?
  * Downloading and decoding a frame takes up to a second or more. A time slider or play
  * button flips between frames quickly, so we keep the last few decoded frames in memory
- * (option `cacheFrames`) and let callers prefetch the next ones:
+ * (options `cacheFrames` / `cacheMemory`) and let callers prefetch the next ones:
  *
  *      slider moves to 06:00  ->  isTimeReady(06:00)?  ->  yes: show it immediately
  *                                                      ->  no:  prefetchTime(06:00), show when ready
  *
- * Panning and zooming the map NEVER touch this file: the wind data is cached, only the
+ * Panning and zooming the map NEVER touch this file: the data is cached, only the
  * on-screen sampling is redone (see speed-field.js).
  *
  * THE LIFE OF A REQUEST
@@ -1552,7 +2323,7 @@
             this._time = +time;
             if (this._t0 === null) this._t0 = this._time;   // remember the first time ever shown
             if (!this._isTimeDependent()) return Promise.resolve(false);
-            // keepParticles: the particles keep flowing; only the wind they follow changes.
+            // keepParticles: the particles keep flowing; only the field they follow changes.
             return this._load({ keepParticles: true });
         },
 
@@ -1598,14 +2369,14 @@
         _frameKey: function (time) {
             const source = this._sourceFor(time);
             if (source === "test") return "test@" + this._hours(time);
-            return source instanceof parts.WindData ? source : String(source);
+            return source instanceof parts.VelocityData ? source : String(source);
         },
 
         // ---- the cache ---------------------------------------------------
 
         /**
          * Find or create the cache entry for `time`:
-         *   { promise: resolves to the WindData, data: the WindData once loaded, abort: AbortController }
+         *   { promise: resolves to the VelocityData, data: the VelocityData once loaded, abort: AbortController }
          * The Map keeps insertion order, and re-inserting on every use makes it an LRU
          * ("least recently used first") list, which _trimFrames relies on.
          */
@@ -1624,6 +2395,7 @@
             const entry = { data: null, abort: abortController, promise: null };
 
             entry.promise = parts.loadSource(source, {
+                format: o.format,
                 level: o.level,
                 levelType: o.levelType,
                 fetchOptions: o.fetchOptions,
@@ -1632,6 +2404,7 @@
                 onProgress: (bytes) => this.fire("progress", { source, time, loaded: bytes })
             }).then((data) => {
                 entry.data = data;
+                this._trimFrames();   // its size is known only now
                 return data;
             });
 
@@ -1645,13 +2418,22 @@
             return entry;
         },
 
-        // Evict the least recently used frames beyond `cacheFrames`, but never the one on screen.
+        /**
+         * Evict least recently used frames, but only while there are more than `cacheFrames` AND they use
+         * more than `cacheMemory` MB, so a whole short sequence stays in memory and loops replay instantly.
+         * Never evicts the frame on screen, and never cancels one still loading: the TimeDimension
+         * player may be waiting for it, and would otherwise stall until its loadingTimeout.
+         */
         _trimFrames: function () {
-            const max = Math.max(2, this.options.cacheFrames);
+            const minFrames = Math.max(2, this.options.cacheFrames);
+            const budget = this.options.cacheMemory * 1048576;
+            const size = (data) => (data.u.byteLength || 0) + (data.v.byteLength || 0);
+            let bytes = 0;
+            for (const entry of this._frames.values()) if (entry.data) bytes += size(entry.data);
             for (const [key, entry] of this._frames) {
-                if (this._frames.size <= max) break;
-                if (entry.data && entry.data === this._data) continue;
-                if (!entry.data) entry.abort.abort();        // still downloading: cancel it
+                if (this._frames.size <= minFrames || bytes <= budget) break;
+                if (!entry.data || entry.data === this._data) continue;
+                bytes -= size(entry.data);
                 this._frames.delete(key);
             }
         },
@@ -1723,15 +2505,15 @@
 
 /* ===== src/speed-field.js ===== */
 /*
- * speed-field.js — the coloured wind-speed background, and the screen-aligned wind grid
- * ======================================================================================
+ * speed-field.js — the coloured speed background, and the screen-aligned velocity grid
+ * ====================================================================================
  *
  * Part of leaflet.easyvelocity. This file is a MIXIN for the L.EasyVelocity layer: its methods are
  * mixed in by leaflet.easyvelocity.js and `this` is the layer. Needs Leaflet.
  *
  * TWO COORDINATE WORLDS
  * ---------------------
- *   geographic   latitude/longitude. The WindData lives here.
+ *   geographic   latitude/longitude. The VelocityData lives here.
  *   canvas       pixels of the layer's own <canvas>, origin at its top-left corner. Drawing,
  *                and the particles' positions, live here.
  *
@@ -1740,13 +2522,13 @@
  *
  *      for a coarse grid of canvas pixels (every `fieldResolution` px, default 4 px):
  *          convert the pixel to latitude/longitude        <- Leaflet does this
- *          ask WindData for the wind there                 <- bilinear interpolation
+ *          ask VelocityData for the velocity there        <- bilinear interpolation
  *          store it in a small array (this._gu / this._gv, "u" and "v" per grid cell)
  *
- * The result is a "screen grid": a picture of the wind field in canvas pixels. Everything
+ * The result is a "screen grid": a picture of the velocity field in canvas pixels. Everything
  * after that is cheap:
  *   - the colour field is just that grid painted as an image (_drawField), and
- *   - each particle looks up its wind in the same grid (see particles.js).
+ *   - each particle looks up its velocity in the same grid (see particles.js).
  *
  * When does this run? On every moveend / zoom / resize / new data. NOT while dragging (the
  * canvas simply moves with the map pane), and never involving a download.
@@ -1756,6 +2538,11 @@
  * `colorScale` is a list of [speed in m/s, CSS colour] stops. Speeds in between are blended
  * linearly. For speed we precompute a 256-entry lookup table (LUT) from slowest to fastest, so
  * painting a cell is one array lookup instead of colour maths.
+ *
+ * FADING SLOW SPEEDS
+ * ------------------
+ * With `fadeBelow` (m/s) > 0, each LUT entry also gets an opacity: 0 at rest, rising smoothly to
+ * full at `fadeBelow`. Calm areas then let the base map show through and strong flow stands out.
  */
 (function (root) {
     "use strict";
@@ -1768,6 +2555,9 @@
         [0, "#264b96"], [3, "#2f8ed1"], [6, "#2fc2a8"], [9, "#6fd05c"], [12, "#d3df3a"],
         [16, "#f7b52c"], [20, "#f26b21"], [25, "#d62839"], [32, "#8a1c7c"]
     ];
+
+    // Display units: how many of each make 1 m/s. Data, colorScale and fadeBelow always stay in m/s.
+    parts.speedUnits = { "m/s": 1, "kt": 1.943844, "mph": 2.236936, "km/h": 3.6 };
 
     /**
      * Turn [[value, cssColor], ...] into [{value, color, r, g, b}, ...] sorted by value.
@@ -1790,18 +2580,30 @@
 
     parts.speedField = {
 
-        /** The colour scale, for building a legend: { units, min, max, stops: [{value, color}] }. */
+        /**
+         * The colour scale for building a legend, in the `units` option's unit:
+         * { units, factor, min, max, fadeBelow, stops: [{value, color}] }. `factor` converts m/s to `units`.
+         */
         getLegend: function () {
             const stops = this._stops;
+            const units = this.options.units in parts.speedUnits ? this.options.units : "m/s";
+            const factor = parts.speedUnits[units];
             return {
-                units: "m/s",
-                min: stops[0].value,
-                max: stops[stops.length - 1].value,
-                stops: stops.map((s) => ({ value: s.value, color: s.color }))
+                units,
+                factor,
+                min: stops[0].value * factor,
+                max: stops[stops.length - 1].value * factor,
+                fadeBelow: Math.max(0, this.options.fadeBelow || 0) * factor,
+                stops: stops.map((s) => ({ value: s.value * factor, color: s.color }))
             };
         },
 
-        /** Build the 256-colour lookup table from the `colorScale` option. */
+        /** Speed in m/s -> the `units` option's unit. */
+        toDisplaySpeed: function (metresPerSecond) {
+            return metresPerSecond * (parts.speedUnits[this.options.units] || 1);
+        },
+
+        /** Build the 256-entry lookup table from the `colorScale` and `fadeBelow` options. */
         _buildLut: function () {
             const scale = this.options.colorScale && this.options.colorScale.length > 1
                 ? this.options.colorScale
@@ -1811,7 +2613,8 @@
             const max = stops[stops.length - 1].value;
             this._lutScale = 255 / Math.max(1e-9, max - min);   // speed -> LUT index multiplier
 
-            const lut = this._lut = new Uint8ClampedArray(256 * 3);   // r, g, b per entry
+            const fade = Math.max(0, this.options.fadeBelow || 0);
+            const lut = this._lut = new Uint8ClampedArray(256 * 4);   // r, g, b, alpha per entry
             let s = 0; // index of the stop at the lower end of the current segment
             for (let i = 0; i < 256; i++) {
                 const speed = min + (i / 255) * (max - min);
@@ -1820,9 +2623,11 @@
                 const b = stops[s + 1];
                 // How far between the two stops are we? 0..1
                 const t = b.value === a.value ? 0 : Math.min(1, Math.max(0, (speed - a.value) / (b.value - a.value)));
-                lut[i * 3] = a.r + (b.r - a.r) * t;
-                lut[i * 3 + 1] = a.g + (b.g - a.g) * t;
-                lut[i * 3 + 2] = a.b + (b.b - a.b) * t;
+                lut[i * 4] = a.r + (b.r - a.r) * t;
+                lut[i * 4 + 1] = a.g + (b.g - a.g) * t;
+                lut[i * 4 + 2] = a.b + (b.b - a.b) * t;
+                const f = fade > 0 ? Math.min(1, Math.max(0, speed / fade)) : 1;
+                lut[i * 4 + 3] = 255 * f * f * (3 - 2 * f);   // smoothstep: no visible edge where the fade ends
             }
         },
 
@@ -1841,7 +2646,7 @@
         },
 
         /**
-         * Sample the cached WindData onto the screen grid (see the top of this file), then
+         * Sample the cached VelocityData onto the screen grid (see the top of this file), then
          * repaint the colour field.
          *
          * Grid cell (i, j) corresponds to canvas pixel (i * cell, j * cell), where `cell` is
@@ -1957,11 +2762,11 @@
                 let index = ((speed - lutMin) * lutScale) | 0;           // speed -> 0..255
                 index = index < 0 ? 0 : index > 255 ? 255 : index;       // clamp
                 const p = k * 4;
-                const c = index * 3;
+                const c = index * 4;
                 rgba[p] = lut[c];
                 rgba[p + 1] = lut[c + 1];
                 rgba[p + 2] = lut[c + 2];
-                rgba[p + 3] = 255;
+                rgba[p + 3] = lut[c + 3];
             }
             smallCtx.putImageData(image, 0, 0);
 
@@ -1979,7 +2784,7 @@
 
 /* ===== src/particles.js ===== */
 /*
- * particles.js — the animated wind particles
+ * particles.js — the animated flow particles
  * ===========================================
  *
  * Part of leaflet.easyvelocity. This file is a MIXIN for the L.EasyVelocity layer: its methods are
@@ -1989,7 +2794,7 @@
  * -----------------------
  * Thousands of tiny "particles" are placed at random positions. Every animation frame
  * (about 60 times a second) each particle:
- *   1. looks up the wind at its position in the screen grid built by speed-field.js,
+ *   1. looks up the velocity at its position in the screen grid built by speed-field.js,
  *   2. moves a little way in that direction,
  *   3. draws a short line from its old to its new position.
  * Lines from previous frames are faded out a little each frame instead of erased, which
@@ -1997,7 +2802,7 @@
  * random position, so the picture stays evenly covered.
  *
  *      frame n                 frame n+1
- *        o  ->  wind  ->         o          the line drawn between the two positions is one
+ *        o  ->  flow  ->         o          the line drawn between the two positions is one
  *      (x, y)               (x + dx, y + dy)   small piece of a trail
  *
  * PERFORMANCE: thousands of particles, 60 frames a second, so
@@ -2010,11 +2815,11 @@
  *   _age[i]          frames lived so far; -1 means "dormant": waiting for a place with data
  *   _maxAge[i]       lifetime in frames (randomised so they do not all die at once)
  *
- * WIND DIRECTION ON SCREEN
+ * FLOW DIRECTION ON SCREEN
  *   u (east)  increases x (moves right)
  *   v (north) DEcreases y (screen y grows downwards)       so:  dy = -v * scale
  *
- * MISSING DATA: if the wind under a particle is NaN (outside the data, or a hole), the
+ * MISSING DATA: if the velocity under a particle is NaN (outside the data, or a hole), the
  * particle becomes dormant, then respawns somewhere that has data. That is the
  * "disappears and reappears" behaviour.
  */
@@ -2057,7 +2862,7 @@
         },
 
         /**
-         * Put particle i at a random canvas position that has wind data.
+         * Put particle i at a random canvas position that has data.
          * Tries 8 random spots; if none has data the particle goes dormant (age = -1) and is
          * retried on the next frame.
          * @returns {boolean} true if it was placed
@@ -2073,7 +2878,7 @@
                 const x = Math.random() * (canvasW - 1);
                 const y = Math.random() * (canvasH - 1);
                 const gridIndex = Math.round(y * toGrid) * gridW + Math.round(x * toGrid);
-                if (gu[gridIndex] === gu[gridIndex]) {          // not NaN: there is wind data here
+                if (gu[gridIndex] === gu[gridIndex]) {          // not NaN: there is data here
                     this._px[i] = x;
                     this._py[i] = y;
                     this._age[i] = 0;
@@ -2148,7 +2953,7 @@
             const gridH = this._gh;
             const toGrid = 1 / this._cell;
 
-            // Pixels moved per frame for 1 m/s of wind. Deliberately independent of zoom, so the
+            // Pixels moved per frame for 1 m/s of velocity. Deliberately independent of zoom, so the
             // motion looks the same at every zoom level (as on windy.com); particle density is
             // constant too, because the count is spread over the same screen-sized canvas.
             const pixelsPerMps = 0.15 * o.particleSpeed * this._ratio;
@@ -2177,8 +2982,8 @@
                 const fy = gy - iy;          // 0..1 down the cell
                 const b = iy * gridW + ix;   // index of the cell's top-left corner
 
-                // Bilinear interpolation of the wind from the 4 corners (the same idea as in
-                // WindData.sample, see wind-data.js).
+                // Bilinear interpolation of the velocity from the 4 corners (the same idea as in
+                // VelocityData.sample, see velocity-data.js).
                 const u = (gu[b] * (1 - fx) + gu[b + 1] * fx) * (1 - fy) +
                     (gu[b + gridW] * (1 - fx) + gu[b + gridW + 1] * fx) * fy;
                 const v = (gv[b] * (1 - fx) + gv[b + 1] * fx) * (1 - fy) +
@@ -2228,14 +3033,14 @@
  *   3. When the clock has switched, it fires "timeload"; layers update their display (`_update`).
  *   The player also announces upcoming times ("timeloading") so layers can prefetch them.
  *
- * Our wrapper layer translates that into the wind layer's own API:
- *   isReady(T)             ->  windLayer.isTimeReady(T)
- *   "timeloading" {T}      ->  windLayer.prefetchTime(T), then fire "timeload"
- *   switch to T (_update)  ->  windLayer.setTime(T)
+ * Our wrapper layer translates that into the velocity layer's own API:
+ *   isReady(T)             ->  velocityLayer.isTimeReady(T)
+ *   "timeloading" {T}      ->  velocityLayer.prefetchTime(T), then fire "timeload"
+ *   switch to T (_update)  ->  velocityLayer.setTime(T)
  *
  * USAGE
- *   const wind = L.easyVelocity({ timeSource: (timeMs) => "https://.../file-for-that-time" });
- *   L.timeDimension.layer.easyVelocity(wind).addTo(map);     // NOT wind.addTo(map)
+ *   const layer = L.easyVelocity({ timeSource: (timeMs) => "https://.../file-for-that-time" });
+ *   L.timeDimension.layer.easyVelocity(layer).addTo(map);     // NOT layer.addTo(map)
  */
 (function (root) {
     "use strict";
@@ -2267,7 +3072,7 @@
                 });
             },
 
-            // "Could you show time T instantly?"  (_baseLayer is the wind layer we wrap)
+            // "Could you show time T instantly?"  (_baseLayer is the velocity layer we wrap)
             isReady: function (time) {
                 return this._baseLayer.isTimeReady(time);
             },
@@ -2307,27 +3112,31 @@
  * Applications normally load the single built file instead, dist/leaflet.easyvelocity.js, which is
  * these src/ files joined in the order below (see tools/build-dist.js).
  *
- *   const wind = L.easyVelocity({ source: "test" }).addTo(map);
- *   const wind = L.easyVelocity({ source: "https://.../gfs.t00z.pgrb2.0p25.f000" }).addTo(map);
+ *   const layer = L.easyVelocity({ source: "test" }).addTo(map);
+ *   const layer = L.easyVelocity({ source: "https://.../gfs.t00z.pgrb2.0p25.f000" }).addTo(map);
  *
- * leaflet.easyvelocity is a Leaflet plugin that draws wind as a coloured speed field plus animated
+ * leaflet.easyvelocity is a Leaflet plugin that draws a velocity field (wind, ocean currents, any
+ * U/V data) as a coloured speed field plus animated
  * particles, on its own <canvas> elements (it does not use Leaflet's SVG/Canvas renderers,
  * so the host map's `preferCanvas` setting makes no difference).
  *
  * THE FILES, in load order (see examples/index.html), and how they relate
  * -----------------------------------------------------------------------
- *  DATA SIDE: getting wind numbers. No Leaflet, no drawing. Could run in a Web Worker.
+ *  DATA SIDE: getting U/V numbers. No Leaflet, no drawing. Could run in a Web Worker.
  *    src/grib2-unpack.js   decodes GRIB2 packed numbers (bit reader, packing formulas)
  *    src/grib2-reader.js   walks a GRIB2 message, reads its metadata, calls the unpacker
- *    src/wind-data.js      WindData: the wind grid + "what is the wind at lat/lon?"
- *    src/test-field.js     a synthetic WindData for development ("test" source)
- *    src/grib-loader.js    URL -> WindData (index + Range requests, or streaming)
+ *    src/netcdf-reader.js  reads a NetCDF classic file: dimensions, attributes, variables
+ *    src/netcdf4-reader.js reads NetCDF-4 (HDF5) through the optional h5wasm library
+ *    src/velocity-data.js  VelocityData: the U/V grid + "what is the velocity at lat/lon?"
+ *    src/test-field.js     a synthetic VelocityData for development ("test" source)
+ *    src/grib-loader.js    URL -> VelocityData (index + Range requests, or streaming); loadSource()
+ *    src/netcdf-loader.js  NetCDF URL -> VelocityData (finds the U/V variables, time and level)
  *    src/time-sources.js   list of (time, source) pairs -> times + timeSource for a time slider
  *    src/gfs.js            NOAA GFS / GEFS URL and forecast-time helpers
  *
  *  LAYER SIDE: drawing. Mixins that become methods of the layer defined in THIS file.
- *    src/frame-cache.js    loading + caching one WindData per time step, setTime()
- *    src/speed-field.js    colour scale, the on-screen wind grid, painting the speed field
+ *    src/frame-cache.js    loading + caching one VelocityData per time step, setTime()
+ *    src/speed-field.js    colour scale, the on-screen velocity grid, painting the speed field
  *    src/particles.js      the animated particles
  *
  *  OPTIONAL:
@@ -2336,8 +3145,8 @@
  *  THIS FILE: the Leaflet layer itself: options, the public API, how the canvases are placed
  *  on the map, and how they follow panning, zooming and resizing.
  *
- * The two halves only meet through WindData: the layer never sees GRIB, and the loaders never
- * see the map. To support a new data format, write a loader that returns a WindData.
+ * The two halves only meet through VelocityData: the layer never sees GRIB, and the loaders never
+ * see the map. To support a new data format, write a loader that returns a VelocityData.
  *
  * HOW THE LAYER STAYS ALIGNED WITH THE MAP
  * ----------------------------------------
@@ -2345,7 +3154,7 @@
  * whole pane, so anything inside it moves for free. Our two canvases live in a pane too and are
  * a bit LARGER than the visible map (option `padding`), so a bit of extra map can be dragged
  * into view before we have to redraw. When the movement ENDS (moveend) we re-centre the canvases
- * on the new view and re-sample the wind (speed-field.js). During a zoom animation Leaflet
+ * on the new view and re-sample the velocity (speed-field.js). During a zoom animation Leaflet
  * scales the canvases with a CSS transform (_updateTransform), then we redraw at the new zoom.
  */
 (function (root) {
@@ -2359,8 +3168,10 @@
         throw new Error("leaflet.easyvelocity: Leaflet (global L) must be loaded before leaflet.easyvelocity.js.");
     }
     const required = {
-        "src/grib2-unpack.js": "unpack", "src/grib2-reader.js": "grib2", "src/wind-data.js": "WindData",
-        "src/test-field.js": "createTestField", "src/grib-loader.js": "loadSource", "src/time-sources.js": "timeList",
+        "src/grib2-unpack.js": "unpack", "src/grib2-reader.js": "grib2", "src/netcdf-reader.js": "netcdf",
+        "src/netcdf4-reader.js": "netcdf4",
+        "src/velocity-data.js": "VelocityData", "src/test-field.js": "createTestField", "src/grib-loader.js": "loadSource",
+        "src/netcdf-loader.js": "loadNetcdf", "src/time-sources.js": "timeList",
         "src/gfs.js": "gfsUrl",
         "src/frame-cache.js": "frameLoading", "src/speed-field.js": "speedField", "src/particles.js": "particles",
         "src/time-dimension.js": "installTimeDimension"
@@ -2378,10 +3189,12 @@
 
         options: {
             // ---- data ----
-            source: "test",            // "test" | a GRIB2 URL | a WindData object
+            source: "test",            // "test" | a GRIB2 or NetCDF URL | a VelocityData object
+            format: "auto",            // "auto" (NetCDF for .nc URLs, else GRIB2) | "grib2" | "netcdf"
             timeSource: null,          // optional: (timeMs) => source. Gives each time its own file; overrides `source`
-            cacheFrames: 6,            // how many decoded time steps to keep in memory
-            level: 10,                 // which wind to use: 10 = 10 m above ground (for levelType 100: hPa, e.g. 850)
+            cacheFrames: 6,            // always keep at least this many decoded time steps in memory...
+            cacheMemory: 200,          // ...and more while they use less than this many MB (whole loops stay cached)
+            level: 10,                 // which level to use: 10 = 10 m above ground (for levelType 100: hPa, e.g. 850)
             levelType: 103,            // GRIB2 level type: 103 = metres above ground, 100 = pressure level
             fetchOptions: {},          // extra fetch() options for the streaming download
 
@@ -2399,12 +3212,14 @@
             showSpeedField: true,
             opacity: 0.75,             // opacity of the colour field
             colorScale: null,          // [[speed m/s, cssColor], ...]; null = default (see speed-field.js)
+            fadeBelow: 0,              // m/s: the field fades to transparent below this speed; 0 = no fading
+            units: "m/s",              // display unit for getLegend() / toDisplaySpeed(): "m/s" | "kt" | "mph" | "km/h"
 
             // ---- behaviour ----
             pane: "overlayPane",       // Leaflet pane the canvases are placed in
             autoStart: true,           // start animating as soon as the layer is on the map
             padding: 0.25,             // canvas extends this fraction beyond the viewport on every side
-            fieldResolution: 4,        // CSS pixels between wind samples of the screen grid
+            fieldResolution: 4,        // CSS pixels between velocity samples of the screen grid
             pixelRatio: 1              // canvas pixels per CSS pixel (2 = sharper on retina, 4x the work)
         },
 
@@ -2414,7 +3229,7 @@
             if (!this.options.colorScale) this.options.colorScale = parts.defaultColorScale;
 
             // -- data / frame cache (frame-cache.js) --
-            this._data = null;          // the WindData currently displayed
+            this._data = null;          // the VelocityData currently displayed
             this._status = "idle";      // "idle" | "loading" | "ready" | "error"
             this._error = null;
             this._frames = new Map();   // cache: key -> { promise, data, abort }
@@ -2425,7 +3240,7 @@
             // -- screen grid (speed-field.js) --
             this._gridReady = false;
             this._rebuildHandle = 0;
-            this._tmp = new Float32Array(2);   // scratch space for WindData.sample()
+            this._tmp = new Float32Array(2);   // scratch space for VelocityData.sample()
 
             // -- particles / animation (particles.js) --
             this._wantRunning = this.options.autoStart !== false;
@@ -2440,7 +3255,7 @@
         // ---- public API (the rest comes from the mixins) ------------------
 
         /**
-         * Change any option while the layer is running, e.g. wind.setOptions({ particleCount: 8000 }).
+         * Change any option while the layer is running, e.g. layer.setOptions({ particleCount: 8000 }).
          * Only the parts that depend on the changed options are redone.
          */
         setOptions: function (opts) {
@@ -2448,6 +3263,7 @@
             const sourceChanged = opts && (
                 ("source" in opts && opts.source !== previous.source) ||
                 ("timeSource" in opts && opts.timeSource !== previous.timeSource) ||
+                ("format" in opts && opts.format !== previous.format) ||
                 ("level" in opts && opts.level !== previous.level) ||
                 ("levelType" in opts && opts.levelType !== previous.levelType));
 
@@ -2458,7 +3274,7 @@
                 this._allocParticles();
                 if (this._gridReady) this._initParticles();
             }
-            if (o.colorScale !== previous.colorScale) {
+            if (o.colorScale !== previous.colorScale || o.fadeBelow !== previous.fadeBelow) {
                 this._buildLut();
                 if (this._gridReady) this._drawField();
             }
@@ -2481,9 +3297,9 @@
         getSource: function () { return this.options.source; },
         getStatus: function () { return this._status; },       // "idle" | "loading" | "ready" | "error"
         getError: function () { return this._error; },
-        getData: function () { return this._data; },            // the WindData on screen
+        getData: function () { return this._data; },            // the VelocityData on screen
 
-        /** Wind at a point from the cached data: { u, v, speed } or null if there is no data there. */
+        /** Velocity at a point from the cached data: { u, v, speed } or null if there is no data there. */
         getVector: function (lat, lon) {
             return this._data ? this._data.getVector(lat, lon) : null;
         },
@@ -2651,8 +3467,10 @@
     L.windField = L.easyVelocity;
 
     // Handy extras for application code and the demo page.
-    L.easyVelocity.WindData = parts.WindData;
+    L.easyVelocity.VelocityData = parts.VelocityData;
+    L.easyVelocity.WindData = parts.VelocityData;   // old name
     L.easyVelocity.Grib2 = parts.grib2;
+    L.easyVelocity.NetCDF = parts.netcdf;
     L.easyVelocity.createTestField = parts.createTestField;
     L.easyVelocity.gfsUrl = parts.gfsUrl;
     L.easyVelocity.gfsForecast = parts.gfsForecast;
@@ -2661,10 +3479,12 @@
     L.easyVelocity.gefsMeanForecast = parts.gefsMeanForecast;
     L.easyVelocity.timeList = parts.timeList;
     L.easyVelocity.defaultColorScale = parts.defaultColorScale;
+    L.easyVelocity.speedUnits = parts.speedUnits;
     L.easyVelocity.installTimeDimension = parts.installTimeDimension;
 
     L.windField.WindData = L.easyVelocity.WindData;
     L.windField.Grib2 = L.easyVelocity.Grib2;
+    L.windField.NetCDF = L.easyVelocity.NetCDF;
     L.windField.createTestField = L.easyVelocity.createTestField;
     L.windField.gfsUrl = L.easyVelocity.gfsUrl;
     L.windField.gfsForecast = L.easyVelocity.gfsForecast;

@@ -12,7 +12,7 @@
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
-    <!-- Leaflet.TimeDimension (slider/player control) + its ISO8601 dependency; must load before leaflet.easyvelocity.js -->
+    <!-- Leaflet.TimeDimension for the time slider; load it before leaflet.easyvelocity.js -->
     <link
         rel="stylesheet"
         href="https://cdn.jsdelivr.net/npm/leaflet-timedimension@1.1.1/dist/leaflet.timedimension.control.min.css"
@@ -20,15 +20,13 @@
     <script src="https://cdn.jsdelivr.net/npm/iso8601-js-period@0.2.1/iso8601.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/leaflet-timedimension@1.1.1/dist/leaflet.timedimension.min.js"></script>
 
-    <!-- leaflet.easyvelocity. By default the readable source files load one by one (edit src/ and refresh).
-         Add ?dist to the page URL to load the single built file dist/leaflet.easyvelocity.js instead, which
-         is what an application would use: one tag, after Leaflet (and after TimeDimension if used):
-             <script src="leaflet.easyvelocity.js"></script> -->
+    <!-- The plugin. Loads the separate files from src/ so edits show up on refresh;
+         add ?dist to the URL to use the built dist/leaflet.easyvelocity.js instead. -->
     <script>
         (function () {
-            // Same order as tools/build-dist.js; leaflet.easyvelocity must load last.
-            var files = ["grib2-unpack", "grib2-reader", "wind-data", "test-field", "grib-loader",
-                "time-sources", "gfs", "frame-cache", "speed-field", "particles", "time-dimension", "leaflet.easyvelocity"];
+            // Same order as tools/build-dist.js
+            var files = ["grib2-unpack", "grib2-reader", "netcdf-reader", "netcdf4-reader", "velocity-data", "test-field", "grib-loader",
+                "netcdf-loader", "time-sources", "gfs", "frame-cache", "speed-field", "particles", "time-dimension", "leaflet.easyvelocity"];
             var tags = new URLSearchParams(location.search).has("dist")
                 ? ['<script src="../dist/leaflet.easyvelocity.js"><\/script>']
                 : files.map(function (f) { return '<script src="../src/' + f + '.js"><\/script>'; });
@@ -39,97 +37,150 @@
     <style>
         html, body { height: 100%; margin: 0; font: 13px/1.4 system-ui, sans-serif; }
         #map { position: absolute; inset: 0; }
-
-        .panel {
-            position: absolute; z-index: 1000;
-            background: rgba(255, 255, 255, 0.94); color: #222;
-            border-radius: 6px; box-shadow: 0 1px 6px rgba(0, 0, 0, 0.4);
-            padding: 10px 12px;
-        }
-        #controls { top: 10px; right: 10px; width: 280px; }
-        #controls h1 { font-size: 14px; margin: 0 0 8px; }
-        #controls .row { display: flex; align-items: center; gap: 6px; margin: 6px 0; }
-        #controls .row label { flex: 0 0 82px; }
-        #controls input[type=range] { flex: 1; min-width: 0; }
-        #controls input[type=text], #controls select { flex: 1; min-width: 0; }
-        #controls .val { flex: 0 0 44px; text-align: right; font-variant-numeric: tabular-nums; }
         [hidden] { display: none !important; }
-        #controls .checks { display: flex; gap: 14px; }
+
+        /* settings panel */
+        #controls {
+            position: absolute; z-index: 1000; top: 10px; right: 10px;
+            width: 300px; min-width: 230px; min-height: 44px;
+            max-width: calc(100vw - 20px); max-height: calc(100vh - 20px);
+            display: flex; flex-direction: column;
+            background: rgba(255, 255, 255, 0.95); color: #222;
+            border-radius: 8px; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+            resize: both; overflow: hidden;
+        }
+        #controls .header {
+            display: flex; align-items: center; gap: 8px; padding: 8px 8px 8px 12px;
+            cursor: move; user-select: none; touch-action: none; border-bottom: 1px solid #e3e3e3;
+        }
+        #controls .header h1 { flex: 1; font-size: 14px; margin: 0; }
+        #controls .header .grip { color: #999; letter-spacing: -2px; }
+        #collapseBtn {
+            display: flex; align-items: center; justify-content: center;
+            width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px;
+            background: #eee; color: #444; cursor: pointer;
+        }
+        #collapseBtn:hover { background: #ddd; }
+        #collapseBtn svg { transform: rotate(180deg); transition: transform 0.2s; }
+        #controls.collapsed #collapseBtn svg { transform: none; }
+        #controls .body { flex: 1; overflow: auto; padding: 8px 12px 10px; }
+        #controls.collapsed { resize: none; height: auto !important; min-height: 0; }
+        #controls.collapsed .body { display: none; }
+        #controls.collapsed .header { border-bottom: 0; }
+
+        #controls .row { display: flex; align-items: center; gap: 6px; margin: 6px 0; }
+        #controls .row > label { flex: 0 0 70px; }
+        #controls input[type=range] { flex: 1; min-width: 0; }
+        #controls input[type=text], #controls select { flex: 1; min-width: 0; font: inherit; padding: 4px; }
+        #controls button { font: inherit; }
+        #controls .val { flex: 0 0 44px; text-align: right; font-variant-numeric: tabular-nums; }
+        #controls .checks { flex-wrap: wrap; gap: 4px 14px; }
         #controls .checks label { flex: none; white-space: nowrap; }
-        #controls hr { border: 0; border-top: 1px solid #ddd; margin: 8px 0; }
-        #source { word-break: break-all; font-size: 11px; color: #444; }
+        #controls hr { border: 0; border-top: 1px solid #e3e3e3; margin: 8px 0; }
+        #steps { font-size: 12px; font-weight: 600; color: #234; }
         #note { font-size: 11px; color: #555; margin: 4px 0; }
+        #source { word-break: break-all; font-size: 11px; color: #666; }
         #status { margin-top: 4px; font-size: 12px; }
         #status.error { color: #b00020; font-weight: 600; }
         #cursor { font-size: 12px; color: #444; min-height: 1.4em; }
 
-        #legend { left: 10px; bottom: 110px; width: 240px; }
-        #legend .bar { height: 12px; border-radius: 2px; }
-        #legend .labels { display: flex; justify-content: space-between; font-size: 11px; margin-top: 2px; }
-        #legend .title { font-weight: 600; margin-bottom: 4px; }
+        /* legend */
+        .legend {
+            width: 220px; padding: 6px 10px; border-radius: 6px;
+            background: rgba(255, 255, 255, 0.95); box-shadow: 0 1px 6px rgba(0, 0, 0, 0.35);
+        }
+        .legend .bar { height: 12px; border-radius: 2px; }
+        .legend .labels { display: flex; justify-content: space-between; font-size: 11px; margin-top: 2px; }
+        .legend .title { font-weight: 600; margin-bottom: 4px; }
+
+        /* phones */
+        @media (max-width: 600px) {
+            #controls { top: 8px; left: 8px !important; right: 8px; width: auto; resize: none; max-height: 60vh; }
+            .legend { width: 150px; }
+            .leaflet-top.leaflet-right { top: 52px; }
+            .leaflet-control-timecontrol .timecontrol-date { font-size: 11px; }
+        }
     </style>
 </head>
 <body>
     <div id="map"></div>
 
-    <div id="controls" class="panel">
-        <h1>Velocity field</h1>
+    <div id="controls">
+        <div class="header" id="controlsHeader" title="Drag to move">
+            <span class="grip" aria-hidden="true">⋮⋮</span>
+            <h1>Settings</h1>
+            <button id="collapseBtn" aria-expanded="true" title="Collapse">
+                <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+                    <path d="M3.5 6 8 10.5 12.5 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+                </svg>
+            </button>
+        </div>
+        <div class="body">
+            <div class="row">
+                <label for="sourceSelect">Source</label>
+                <select id="sourceSelect"></select>
+            </div>
+            <div class="row" id="customRow" hidden>
+                <input type="text" id="customUrl" placeholder="https://…/file.grib2 or file.nc" />
+                <button id="loadBtn">Load</button>
+            </div>
+            <div id="steps"></div>
+            <div id="note"></div>
+            <div id="status"></div>
+            <div id="source"></div>
 
-        <div class="row">
-            <label for="sourceSelect">Source</label>
-            <select id="sourceSelect"></select>
-        </div>
-        <div id="note"></div>
-        <div class="row" id="customRow" hidden>
-            <input type="text" id="customUrl" placeholder="https://…/file.grib2" />
-            <button id="loadBtn">Load</button>
-        </div>
-        <div id="source"></div>
-        <div id="status"></div>
+            <hr />
 
-        <hr />
+            <div class="row">
+                <button id="toggleBtn">Stop particles</button>
+                <button id="reloadBtn">Reload</button>
+            </div>
+            <div class="row">
+                <label for="count">Particles</label>
+                <input type="range" id="count" min="500" max="20000" step="500" value="4000" />
+                <span class="val" id="countVal">4000</span>
+            </div>
+            <div class="row">
+                <label for="speed">Speed</label>
+                <input type="range" id="speed" min="0.1" max="4" step="0.1" value="1" />
+                <span class="val" id="speedVal">1.0×</span>
+            </div>
+            <div class="row">
+                <label for="units">Units</label>
+                <select id="units">
+                    <option value="kt" selected>knots (kt)</option>
+                    <option value="m/s">metres per second (m/s)</option>
+                    <option value="mph">miles per hour (mph)</option>
+                    <option value="km/h">kilometres per hour (km/h)</option>
+                </select>
+            </div>
+            <div class="row checks">
+                <label><input type="checkbox" id="showParticles" checked /> Particles</label>
+                <label><input type="checkbox" id="showField" checked /> Velocity Heat Map</label>
+                <label><input type="checkbox" id="fadeCalm" /> <span id="fadeLabel">Fade calm winds</span></label>
+            </div>
 
-        <div class="row">
-            <button id="toggleBtn">Stop particles</button>
-            <button id="reloadBtn">Reload</button>
+            <hr />
+            <div id="cursor">Hover over or tap the map to see the wind there.</div>
         </div>
-        <div class="row">
-            <label for="count">Particles</label>
-            <input type="range" id="count" min="500" max="20000" step="500" value="4000" />
-            <span class="val" id="countVal">4000</span>
-        </div>
-        <div class="row">
-            <label for="speed">Speed</label>
-            <input type="range" id="speed" min="0.1" max="4" step="0.1" value="1" />
-            <span class="val" id="speedVal">1.0×</span>
-        </div>
-        <div class="row checks">
-            <label><input type="checkbox" id="showParticles" checked /> Particles</label>
-            <label><input type="checkbox" id="showField" checked /> Speed field</label>
-        </div>
-
-        <hr />
-        <div id="cursor">Move the mouse over the map.</div>
     </div>
 
-    <div id="legend" class="panel">
-        <div class="title">Wind speed (m/s)</div>
+    <div id="legend" class="legend">
+        <div class="title">Wind speed</div>
         <div class="bar"></div>
         <div class="labels"></div>
     </div>
 
     <script>
-        // Add ?preferCanvas=1 to the URL to test with Leaflet's own canvas renderer.
+        // Add ?preferCanvas=1 to the URL to try Leaflet's canvas renderer.
 
-        // ---- the demo's data sources --------------------------------------
-        // Every source is described the same way: its time steps (`times`, ms) and either a fixed
-        // `source` or a `timeSource` function that maps a time to a file. Live NOAA sources are
-        // computed from the clock when the page loads, so they never go out of date.
+        // ---- data sources ----
+        // Each source has a list of times and either a fixed `source` or a `timeSource(time)` that returns a URL.
         const HOUR = 3600e3;
         const firstHour = Math.floor(Date.now() / HOUR) * HOUR;
         const testTimes = Array.from({ length: 25 }, (_, i) => firstHour + i * HOUR);
 
-        // Same colours as the default scale, stretched for stronger winds aloft.
+        // Upper-level winds are much stronger, so stretch the color scale.
         const scaledColors = (factor) => L.easyVelocity.defaultColorScale.map(([speed, color]) => [speed * factor, color]);
         const colors = { surface: L.easyVelocity.defaultColorScale, mid: scaledColors(1.5), jet: scaledColors(3) };
 
@@ -139,75 +190,116 @@
         const gfsCoarse = L.easyVelocity.gfsForecast({ from: 0, to: 120, step: 6, resolution: "1p00" });
         const gefs = L.easyVelocity.gefsMeanForecast({ from: 0, to: 120, step: 6 });
 
-        // Archived NOAA GFS analyses bundled in data/ (see data/NOTICE.txt): no network needed.
+        // Sample files in data/ (see data/NOTICE.txt).
         const ian = L.easyVelocity.timeList(["06", "12", "18"].map((hh) => ({
             time: "2022-09-28T" + hh + ":00:00Z", source: "data/gfs-20220928-" + hh + "z-f000-10m-uv.grib2" })));
         const elliott = L.easyVelocity.timeList(["06", "12", "18"].map((hh) => ({
             time: "2022-12-23T" + hh + ":00:00Z", source: "data/gfs-20221223-" + hh + "z-f000-10m-uv.grib2" })));
 
+        // One NetCDF file with all three times; #time= picks the step.
+        const ianNetcdf = L.easyVelocity.timeList(["06", "12", "18"].map((hh) => ({
+            time: "2022-09-28T" + hh + ":00:00Z", source: "data/gfs-20220928-0p50-10m-uv.nc#time=2022-09-28T" + hh + ":00:00Z" })));
+
+        // GFS as NetCDF from PacIOOS ERDDAP, one request per time step.
+        const erddapUrl = (timeMs) => {
+            const t = new Date(timeMs).toISOString().replace(".000", "");
+            const grid = "[(" + t + ")][(90):1:(-90)][(0):1:(359.5)]";
+            return "https://pae-paha.pacioos.hawaii.edu/erddap/griddap/ncep_global.nc?" +
+                encodeURI("ugrd10m" + grid + ",vgrd10m" + grid);
+        };
+        const THREE_HOURS = 3 * HOUR;
+        const erddapTimes = Array.from({ length: 17 }, (_, i) => Math.floor(Date.now() / THREE_HOURS) * THREE_HOURS + i * THREE_HOURS);
+
+        // NetCDF-4 needs h5wasm (separate library, NIST/HDF5 licences), loaded only when this source is picked.
+        const H5WASM_URL = "https://cdn.jsdelivr.net/npm/h5wasm@0.10.3/dist/iife/h5wasm.js";
+        const NBS_IAN = "https://www.ncei.noaa.gov/data/blended-global-sea-surface-wind-products/access/reprocessed/wind/2022/6-hourly/NBS_v02_wind_6hourly_d20220928_c20221014.nc";
+        const nbsIan = L.easyVelocity.timeList(["00", "06", "12", "18"].map((hh) => ({
+            time: "2022-09-28T" + hh + ":00:00Z", source: NBS_IAN + "#time=2022-09-28T" + hh + ":00:00Z" })));
+
+        const GRIB2 = "GRIB2", NC = "NetCDF", NC4 = "NetCDF-4", SYNTH = "Synthetic";
         const datasets = {
-            test: {
-                group: "Synthetic", label: "Synthetic test field (24 h)",
-                note: "Generated in the browser. The hole near 46°N 62°W shows how missing data is handled.",
-                source: "test", times: testTimes
-            },
             gfs10: {
-                group: "Live NOAA (follows the clock)", label: "GFS 10 m wind, next 48 h",
-                note: "Newest GFS cycle on AWS, 0.25°, 3-hourly. Each step downloads ~2 MB.",
+                group: GRIB2, label: "GFS 10 m wind, next 48 h",
+                note: "The latest NOAA GFS forecast, every 3 hours.",
                 attribution: NOAA + " GFS", timeSource: gfs10.timeSource, times: gfs10.times
             },
             gfsPast: {
-                group: "Live NOAA (follows the clock)", label: "GFS 10 m wind, last 2 days",
-                note: "The model's analysis (its best picture of the real weather) for the last 8 cycles.",
+                group: GRIB2, label: "GFS 10 m wind, last 2 days",
+                note: "GFS analyses from the last eight model runs.",
                 attribution: NOAA + " GFS", timeSource: gfsPast.timeSource, times: gfsPast.times
             },
             gfs850: {
-                group: "Live NOAA (follows the clock)", label: "GFS 850 hPa wind (~1.5 km up), next 48 h",
-                note: "Wind at the 850 hPa pressure level, above most surface friction. Stronger than 10 m wind.",
+                group: GRIB2, label: "GFS 850 hPa wind (about 1.5 km up)",
+                note: "Above most of the surface friction, so noticeably stronger than at 10 m.",
                 attribution: NOAA + " GFS", timeSource: gfs10.timeSource, times: gfs10.times,
                 level: 850, levelType: 100, colorScale: colors.mid
             },
             gfs250: {
-                group: "Live NOAA (follows the clock)", label: "GFS 250 hPa jet stream (~10 km), next 48 h",
-                note: "Wind at the 250 hPa level, where the jet stream flows at up to ~90 m/s.",
+                group: GRIB2, label: "GFS 250 hPa jet stream (about 10 km up)",
+                note: "The jet stream, often faster than 150 knots.",
                 attribution: NOAA + " GFS", timeSource: gfs10.timeSource, times: gfs10.times,
                 level: 250, levelType: 100, colorScale: colors.jet
             },
             gfsCoarse: {
-                group: "Live NOAA (follows the clock)", label: "GFS 10 m wind, 1° grid, next 5 days (light)",
-                note: "Same model on a coarse 1° grid: ~16x smaller downloads, 6-hourly steps.",
+                group: GRIB2, label: "GFS 10 m wind, 1° grid, next 5 days",
+                note: "A coarser grid, quick to load.",
                 attribution: NOAA + " GFS", timeSource: gfsCoarse.timeSource, times: gfsCoarse.times
             },
             gefs: {
-                group: "Live NOAA (follows the clock)", label: "GEFS ensemble-mean 10 m wind, next 5 days",
-                note: "Average of 30 perturbed GFS runs (0.5°): smoother than a single run.",
+                group: GRIB2, label: "GEFS ensemble mean, next 5 days",
+                note: "The average of the GFS ensemble members, smoother than a single run.",
                 attribution: NOAA + " GEFS", timeSource: gefs.timeSource, times: gefs.times
             },
             ian: {
-                group: "Archived (bundled in data/)", label: "Hurricane Ian, 28 Sep 2022",
-                note: "GFS analyses at 06, 12 and 18 UTC while Ian approached Florida (landfall ~19 UTC).",
-                attribution: NOAA + " GFS (archived)", timeSource: ian.timeSource, times: ian.times,
+                group: GRIB2, label: "Hurricane Ian, 28 Sep 2022",
+                note: "Ian approaching southwest Florida. Landfall came around 19 UTC.",
+                attribution: NOAA + " GFS", timeSource: ian.timeSource, times: ian.times,
                 view: { center: [26, -83], zoom: 6 }, startAt: ian.times[0]
             },
             elliott: {
-                group: "Archived (bundled in data/)", label: "Winter Storm Elliott, 23 Dec 2022",
-                note: "GFS analyses at 06, 12 and 18 UTC as the Arctic outbreak crossed North America.",
-                attribution: NOAA + " GFS (archived)", timeSource: elliott.timeSource, times: elliott.times,
+                group: GRIB2, label: "Winter Storm Elliott, 23 Dec 2022",
+                note: "The Arctic outbreak sweeping across North America before Christmas.",
+                attribution: NOAA + " GFS", timeSource: elliott.timeSource, times: elliott.times,
                 view: { center: [42, -92], zoom: 4 }, startAt: elliott.times[0]
+            },
+            erddap: {
+                group: NC, label: "GFS 10 m wind via ERDDAP, next 48 h",
+                note: "GFS served as NetCDF by the PacIOOS ERDDAP server.",
+                attribution: NOAA + " GFS via PacIOOS ERDDAP", timeSource: erddapUrl, times: erddapTimes
+            },
+            ianNetcdf: {
+                group: NC, label: "Hurricane Ian, 28 Sep 2022",
+                note: "The same Ian data, stored as one NetCDF file.",
+                attribution: NOAA + " GFS", timeSource: ianNetcdf.timeSource, times: ianNetcdf.times,
+                view: { center: [26, -83], zoom: 6 }, startAt: ianNetcdf.times[0]
+            },
+            nbsIan: {
+                group: NC4, label: "Blended Sea Winds, Hurricane Ian",
+                note: "NOAA's blend of satellite and model winds over the ocean. Land has no data.",
+                attribution: "Wind data: NOAA NCEI Blended Sea Winds", timeSource: nbsIan.timeSource, times: nbsIan.times,
+                view: { center: [26, -83], zoom: 6 }, startAt: nbsIan.times[2], needsH5wasm: true
+            },
+            test: {
+                group: SYNTH, label: "Test field, 24 h",
+                note: "Made-up weather generated in the browser. The gap near Nova Scotia shows how missing data looks.",
+                source: "test", times: testTimes
             }
         };
 
+        const narrow = window.matchMedia("(max-width: 600px)").matches;
         const map = L.map("map", {
             preferCanvas: new URLSearchParams(location.search).has("preferCanvas"),
+            zoomControl: !narrow,   // pinch to zoom on phones
             timeDimension: true,
-            timeDimensionOptions: { times: testTimes, currentTime: testTimes[0], loadingTimeout: 30000 },
+            timeDimensionOptions: { times: testTimes, currentTime: testTimes[0], loadingTimeout: 10000 },
             timeDimensionControl: true,
             timeDimensionControlOptions: {
                 position: "bottomleft",
+                speedSlider: !narrow,
                 timeSliderDragUpdate: false,
                 playerOptions: { transitionTime: 1000, buffer: 2, minBufferReady: 1, loop: true }
             }
-        }).setView([40, -75], 5);
+        }).setView([40, -75], narrow ? 3 : 5);
 
         L.tileLayer(
             "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
@@ -216,12 +308,11 @@
             }
         ).addTo(map);
 
-        // Ordinary vector layer, just to show the host map's renderer is independent of the wind canvas.
+        // A regular vector layer alongside, for comparison.
         L.circleMarker([40, -75], { radius: 6, color: "#000", weight: 2, fillColor: "#fff", fillOpacity: 1 })
             .bindTooltip("Regular Leaflet vector layer").addTo(map);
 
-        // To use real data, replace "test" with a GRIB2 URL, e.g. L.easyVelocity.gfsUrl().
-        // For several time steps, pass `timeSource: (timeMs) => url` instead (see gfs.timeSource).
+        // The real source is set by useDataset() at the bottom.
         const wind = L.easyVelocity({
             source: "test",
             particleCount: 4000,
@@ -231,16 +322,58 @@
             trailLength: 0.9,
             showParticles: true,
             showSpeedField: true,
-            opacity: 0.75
+            opacity: 0.75,
+            units: "kt"
         });
 
-        // ---- controls ----------------------------------------------------
+        // ---- controls ----
         const $ = (id) => document.getElementById(id);
-        const panels = [$("controls"), $("legend")];
-        panels.forEach((p) => {
+        const panel = $("controls");
+        for (const p of [panel, $("legend")]) {
             L.DomEvent.disableClickPropagation(p);
             L.DomEvent.disableScrollPropagation(p);
-        });
+        }
+
+        const legendControl = L.control({ position: narrow ? "topright" : "bottomright" });
+        legendControl.onAdd = () => $("legend");
+        legendControl.addTo(map);
+
+        // Panel: drag by the header, resize from the corner (desktop), collapse with the button.
+        if (!narrow) {
+            panel.style.left = (window.innerWidth - panel.offsetWidth - 10) + "px";   // so resizing grows to the right
+            panel.style.right = "auto";
+        }
+        L.DomUtil.setPosition(panel, L.point(0, 0));
+        const dragger = new L.Draggable(panel, $("controlsHeader"));
+        dragger.enable();
+        L.DomEvent.on($("collapseBtn"), "mousedown touchstart pointerdown", L.DomEvent.stopPropagation);
+        function keepPanelOnScreen() {
+            const r = panel.getBoundingClientRect();
+            const p = L.DomUtil.getPosition(panel) || L.point(0, 0);
+            const dx = Math.min(0, window.innerWidth - r.right) - Math.min(0, r.left);
+            const dy = Math.min(0, window.innerHeight - r.top - 44) - Math.min(0, r.top);
+            if (dx || dy) L.DomUtil.setPosition(panel, p.add([dx, dy]));
+        }
+        dragger.on("dragend", keepPanelOnScreen);
+        window.addEventListener("resize", keepPanelOnScreen);
+        function setCollapsed(collapsed) {
+            panel.classList.toggle("collapsed", collapsed);
+            $("collapseBtn").title = collapsed ? "Expand" : "Collapse";
+            $("collapseBtn").setAttribute("aria-expanded", String(!collapsed));
+        }
+        $("collapseBtn").onclick = () => setCollapsed(!panel.classList.contains("collapsed"));
+        setCollapsed(narrow);
+
+        const fmtTime = (ms) => new Date(ms).toLocaleString("en-GB", {
+            day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "UTC" }) + " UTC";
+        function showSteps() {
+            if (select.value === "custom") { $("steps").textContent = "Single time step"; return; }
+            const times = map.timeDimension.getAvailableTimes();
+            const i = times.indexOf(map.timeDimension.getCurrentTime());
+            $("steps").textContent = (i >= 0 ? "Step " + (i + 1) + " of " : "") + times.length +
+                (i >= 0 ? " · " + fmtTime(times[i]) : " time steps");
+        }
+        map.timeDimension.on("timeload availabletimeschanged", showSteps);
 
         function setStatus(text, isError) {
             $("status").textContent = text;
@@ -252,7 +385,6 @@
         }
 
         wind.on("loading", (e) => { describeSource(e.source); setStatus("Loading…"); });
-        // Only report download progress of the frame on screen (prefetches of other times are silent).
         wind.on("progress", (e) => {
             if (e.time == wind.getTime()) setStatus("Downloading… " + (e.loaded / 1048576).toFixed(1) + " MB");
         });
@@ -260,20 +392,34 @@
             const i = e.data.info;
             describeSource(e.source);
             setStatus(i.validTime
-                ? "Loaded " + i.level + " wind, valid " + i.validTime.replace(":00.000Z", "Z") + " (" + i.loadedVia + ")"
-                : "Loaded " + i.name + (e.time != null ? ", " + new Date(e.time).toISOString().replace(":00.000Z", "Z") : ""));
+                ? "Loaded " + i.level + " wind, valid " + fmtTime(Date.parse(i.validTime)) + " (" + i.loadedVia + ")"
+                : "Loaded " + i.name + (e.time != null ? ", " + fmtTime(e.time) : ""));
         });
         wind.on("error", (e) => setStatus("Error: " + e.message, true));
         wind.on("start stop", () => { $("toggleBtn").textContent = wind.isRunning() ? "Stop particles" : "Start particles"; });
 
-        // The wrapper lets the map's TimeDimension (slider, play button) drive the wind layer.
+        // TimeDimension drives the layer through this wrapper.
         L.timeDimension.layer.easyVelocity(wind).addTo(map);
 
         $("toggleBtn").onclick = () => (wind.isRunning() ? wind.stop() : wind.start());
         $("reloadBtn").onclick = () => wind.reload();
 
-        function useDataset(name) {
+        function loadScript(src) {
+            return new Promise((resolve, reject) => {
+                const script = document.createElement("script");
+                script.src = src;
+                script.onload = resolve;
+                script.onerror = () => reject(new Error("Could not load " + src));
+                document.head.appendChild(script);
+            });
+        }
+
+        async function useDataset(name) {
             const d = datasets[name];
+            if (d.needsH5wasm && !window.h5wasm) {
+                setStatus("Loading NetCDF-4 support…");
+                try { await loadScript(H5WASM_URL); } catch (e) { setStatus("Error: " + e.message, true); return; }
+            }
             $("note").textContent = d.note;
             setAttribution(d.attribution);
             wind.setOptions({
@@ -285,11 +431,10 @@
             });
             buildLegend();
             if (d.view) map.setView(d.view.center, d.view.zoom);
-            map.timeDimension.setAvailableTimes(d.times, "replace"); // updates the slider and re-syncs the layer
+            map.timeDimension.setAvailableTimes(d.times, "replace");
             if (d.startAt) map.timeDimension.setCurrentTime(d.startAt);
         }
 
-        // Fill the dropdown from `datasets`, grouped.
         const select = $("sourceSelect");
         const groups = {};
         for (const [key, d] of Object.entries(datasets)) {
@@ -298,15 +443,14 @@
                 groups[d.group].label = d.group;
                 select.appendChild(groups[d.group]);
             }
-            groups[d.group].appendChild(new Option(d.label, key));
+            groups[d.group].appendChild(new Option(d.label + "  (" + d.times.length + " steps)", key));
         }
         const customGroup = document.createElement("optgroup");
         customGroup.label = "Your own data";
-        customGroup.appendChild(new Option("Custom GRIB2 URL…", "custom"));
+        customGroup.appendChild(new Option("Custom GRIB2 / NetCDF URL…", "custom"));
         select.appendChild(customGroup);
-        $("note").textContent = datasets.test.note;
 
-        // NOAA asks for attribution when its data is shown.
+        // NOAA asks to be credited.
         let attribution = null;
         function setAttribution(text) {
             if (attribution) map.attributionControl.removeAttribution(attribution);
@@ -322,11 +466,12 @@
         function loadCustom() {
             const url = $("customUrl").value.trim();
             if (url) {
-                $("note").textContent = "Single static field: the time slider has no effect.";
+                $("note").textContent = "A single file, so the time slider has no effect.";
                 setAttribution(null);
                 wind.setOptions({ source: url, timeSource: null, level: 10, levelType: 103, colorScale: colors.surface });
                 buildLegend();
-            } else setStatus("Enter a GRIB2 URL first.", true);
+                showSteps();
+            } else setStatus("Enter a GRIB2 or NetCDF URL first.", true);
         }
         $("loadBtn").onclick = loadCustom;
         $("customUrl").onkeydown = (e) => { if (e.key === "Enter") loadCustom(); };
@@ -341,24 +486,37 @@
         };
         $("showParticles").onchange = (e) => wind.setOptions({ showParticles: e.target.checked });
         $("showField").onchange = (e) => wind.setOptions({ showSpeedField: e.target.checked });
+        const FADE_BELOW = 8;   // m/s
+        $("fadeCalm").onchange = (e) => { wind.setOptions({ fadeBelow: e.target.checked ? FADE_BELOW : 0 }); buildLegend(); };
+        $("units").onchange = (e) => { wind.setOptions({ units: e.target.value }); buildLegend(); };
 
-        map.on("mousemove", (e) => {
+        map.on("mousemove click", (e) => {
             const w = wind.getVector(e.latlng.lat, e.latlng.lng);
             $("cursor").textContent = w
-                ? w.speed.toFixed(1) + " m/s, from " + ((Math.atan2(-w.u, -w.v) * 180 / Math.PI + 360) % 360).toFixed(0) + "°"
+                ? wind.toDisplaySpeed(w.speed).toFixed(1) + " " + wind.options.units + ", from " +
+                  ((Math.atan2(-w.u, -w.v) * 180 / Math.PI + 360) % 360).toFixed(0) + "°"
                 : "No wind data here";
         });
 
-        // ---- legend ------------------------------------------------------
+        // ---- legend ----
         function buildLegend() {
             const lg = wind.getLegend(), range = lg.max - lg.min;
+            document.querySelector("#legend .title").textContent = "Wind speed (" + lg.units + ")";
+            $("fadeLabel").textContent = "Fade calm winds (< " + Math.round(FADE_BELOW * lg.factor) + " " + lg.units + ")";
             const stops = lg.stops.map((s) => s.color + " " + ((s.value - lg.min) / range * 100).toFixed(1) + "%");
-            document.querySelector("#legend .bar").style.background = "linear-gradient(to right, " + stops.join(", ") + ")";
+            const bar = document.querySelector("#legend .bar");
+            bar.style.background = "linear-gradient(to right, " + stops.join(", ") + ")";
+            const fadeEnd = Math.min(100, Math.max(0, (lg.fadeBelow - lg.min) / range * 100));
+            bar.style.maskImage = bar.style.webkitMaskImage = lg.fadeBelow > 0
+                ? "linear-gradient(to right, transparent 0%, #000 " + fadeEnd.toFixed(1) + "%)" : "";
             document.querySelector("#legend .labels").innerHTML = lg.stops
                 .filter((_, i) => i % 2 === 0 || i === lg.stops.length - 1)
                 .map((s) => "<span>" + Math.round(s.value) + "</span>").join("");
         }
         buildLegend();
+
+        select.value = "gfs10";
+        useDataset(select.value);
     </script>
 </body>
 </html>

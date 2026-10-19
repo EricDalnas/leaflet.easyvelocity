@@ -3,11 +3,16 @@ NOAA GFS sample data in this folder
 
 Files:  gfs-20220928-{06,12,18}z-f000-10m-uv.grib2   (Hurricane Ian, 28 September 2022)
         gfs-20221223-{06,12,18}z-f000-10m-uv.grib2   (Winter Storm Elliott, 23 December 2022)
+        gfs-20220928-0p50-10m-uv.nc                  (Hurricane Ian, NetCDF, derived; see below)
 
 What they are: the 10 m above ground U and V wind messages (UGRD / VGRD) of the NOAA GFS
 0.25 degree analysis (forecast hour 0) for the given dates and cycles, copied byte-for-byte from
 the public NOAA bucket  https://noaa-gfs-bdp-pds.s3.amazonaws.com  (each file is just the two
 original GRIB2 messages, one after the other; nothing was re-encoded or altered).
+
+The NetCDF file is NOT unaltered NOAA data: it was converted from the three Ian GRIB2 files above
+by tools/grib2-to-netcdf.js (--stride 2 --pack), keeping every second grid point (0.5 degree) and
+rounding the values to 0.01 m/s (16-bit integers with scale_factor).
 
 License: data disseminated by NOAA through its Open Data Dissemination (NODD) program are open
 to the public and can be used as desired. NOAA requests attribution for use or dissemination of
@@ -16,5 +21,5 @@ with NOAA. Source and terms: https://registry.opendata.aws/noaa-gfs-bdp-pds/
 
 Attribution: "Wind data: NOAA/NCEP Global Forecast System (GFS)".
 
-You can delete this folder; the example page then simply loses its two "Archived" entries
+You can delete this folder; the example page then simply loses its "Archived" entries
 (remove them from `datasets` in examples/index.html to avoid failed requests).

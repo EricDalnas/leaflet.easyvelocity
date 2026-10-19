@@ -5,27 +5,31 @@
  * Applications normally load the single built file instead, dist/leaflet.easyvelocity.js, which is
  * these src/ files joined in the order below (see tools/build-dist.js).
  *
- *   const wind = L.easyVelocity({ source: "test" }).addTo(map);
- *   const wind = L.easyVelocity({ source: "https://.../gfs.t00z.pgrb2.0p25.f000" }).addTo(map);
+ *   const layer = L.easyVelocity({ source: "test" }).addTo(map);
+ *   const layer = L.easyVelocity({ source: "https://.../gfs.t00z.pgrb2.0p25.f000" }).addTo(map);
  *
- * leaflet.easyvelocity is a Leaflet plugin that draws wind as a coloured speed field plus animated
+ * leaflet.easyvelocity is a Leaflet plugin that draws a velocity field (wind, ocean currents, any
+ * U/V data) as a coloured speed field plus animated
  * particles, on its own <canvas> elements (it does not use Leaflet's SVG/Canvas renderers,
  * so the host map's `preferCanvas` setting makes no difference).
  *
  * THE FILES, in load order (see examples/index.html), and how they relate
  * -----------------------------------------------------------------------
- *  DATA SIDE: getting wind numbers. No Leaflet, no drawing. Could run in a Web Worker.
+ *  DATA SIDE: getting U/V numbers. No Leaflet, no drawing. Could run in a Web Worker.
  *    src/grib2-unpack.js   decodes GRIB2 packed numbers (bit reader, packing formulas)
  *    src/grib2-reader.js   walks a GRIB2 message, reads its metadata, calls the unpacker
- *    src/wind-data.js      WindData: the wind grid + "what is the wind at lat/lon?"
- *    src/test-field.js     a synthetic WindData for development ("test" source)
- *    src/grib-loader.js    URL -> WindData (index + Range requests, or streaming)
+ *    src/netcdf-reader.js  reads a NetCDF classic file: dimensions, attributes, variables
+ *    src/netcdf4-reader.js reads NetCDF-4 (HDF5) through the optional h5wasm library
+ *    src/velocity-data.js  VelocityData: the U/V grid + "what is the velocity at lat/lon?"
+ *    src/test-field.js     a synthetic VelocityData for development ("test" source)
+ *    src/grib-loader.js    URL -> VelocityData (index + Range requests, or streaming); loadSource()
+ *    src/netcdf-loader.js  NetCDF URL -> VelocityData (finds the U/V variables, time and level)
  *    src/time-sources.js   list of (time, source) pairs -> times + timeSource for a time slider
  *    src/gfs.js            NOAA GFS / GEFS URL and forecast-time helpers
  *
  *  LAYER SIDE: drawing. Mixins that become methods of the layer defined in THIS file.
- *    src/frame-cache.js    loading + caching one WindData per time step, setTime()
- *    src/speed-field.js    colour scale, the on-screen wind grid, painting the speed field
+ *    src/frame-cache.js    loading + caching one VelocityData per time step, setTime()
+ *    src/speed-field.js    colour scale, the on-screen velocity grid, painting the speed field
  *    src/particles.js      the animated particles
  *
  *  OPTIONAL:
@@ -34,8 +38,8 @@
  *  THIS FILE: the Leaflet layer itself: options, the public API, how the canvases are placed
  *  on the map, and how they follow panning, zooming and resizing.
  *
- * The two halves only meet through WindData: the layer never sees GRIB, and the loaders never
- * see the map. To support a new data format, write a loader that returns a WindData.
+ * The two halves only meet through VelocityData: the layer never sees GRIB, and the loaders never
+ * see the map. To support a new data format, write a loader that returns a VelocityData.
  *
  * HOW THE LAYER STAYS ALIGNED WITH THE MAP
  * ----------------------------------------
@@ -43,7 +47,7 @@
  * whole pane, so anything inside it moves for free. Our two canvases live in a pane too and are
  * a bit LARGER than the visible map (option `padding`), so a bit of extra map can be dragged
  * into view before we have to redraw. When the movement ENDS (moveend) we re-centre the canvases
- * on the new view and re-sample the wind (speed-field.js). During a zoom animation Leaflet
+ * on the new view and re-sample the velocity (speed-field.js). During a zoom animation Leaflet
  * scales the canvases with a CSS transform (_updateTransform), then we redraw at the new zoom.
  */
 (function (root) {
@@ -57,8 +61,10 @@
         throw new Error("leaflet.easyvelocity: Leaflet (global L) must be loaded before leaflet.easyvelocity.js.");
     }
     const required = {
-        "src/grib2-unpack.js": "unpack", "src/grib2-reader.js": "grib2", "src/wind-data.js": "WindData",
-        "src/test-field.js": "createTestField", "src/grib-loader.js": "loadSource", "src/time-sources.js": "timeList",
+        "src/grib2-unpack.js": "unpack", "src/grib2-reader.js": "grib2", "src/netcdf-reader.js": "netcdf",
+        "src/netcdf4-reader.js": "netcdf4",
+        "src/velocity-data.js": "VelocityData", "src/test-field.js": "createTestField", "src/grib-loader.js": "loadSource",
+        "src/netcdf-loader.js": "loadNetcdf", "src/time-sources.js": "timeList",
         "src/gfs.js": "gfsUrl",
         "src/frame-cache.js": "frameLoading", "src/speed-field.js": "speedField", "src/particles.js": "particles",
         "src/time-dimension.js": "installTimeDimension"
@@ -76,10 +82,12 @@
 
         options: {
             // ---- data ----
-            source: "test",            // "test" | a GRIB2 URL | a WindData object
+            source: "test",            // "test" | a GRIB2 or NetCDF URL | a VelocityData object
+            format: "auto",            // "auto" (NetCDF for .nc URLs, else GRIB2) | "grib2" | "netcdf"
             timeSource: null,          // optional: (timeMs) => source. Gives each time its own file; overrides `source`
-            cacheFrames: 6,            // how many decoded time steps to keep in memory
-            level: 10,                 // which wind to use: 10 = 10 m above ground (for levelType 100: hPa, e.g. 850)
+            cacheFrames: 6,            // always keep at least this many decoded time steps in memory...
+            cacheMemory: 200,          // ...and more while they use less than this many MB (whole loops stay cached)
+            level: 10,                 // which level to use: 10 = 10 m above ground (for levelType 100: hPa, e.g. 850)
             levelType: 103,            // GRIB2 level type: 103 = metres above ground, 100 = pressure level
             fetchOptions: {},          // extra fetch() options for the streaming download
 
@@ -97,12 +105,14 @@
             showSpeedField: true,
             opacity: 0.75,             // opacity of the colour field
             colorScale: null,          // [[speed m/s, cssColor], ...]; null = default (see speed-field.js)
+            fadeBelow: 0,              // m/s: the field fades to transparent below this speed; 0 = no fading
+            units: "m/s",              // display unit for getLegend() / toDisplaySpeed(): "m/s" | "kt" | "mph" | "km/h"
 
             // ---- behaviour ----
             pane: "overlayPane",       // Leaflet pane the canvases are placed in
             autoStart: true,           // start animating as soon as the layer is on the map
             padding: 0.25,             // canvas extends this fraction beyond the viewport on every side
-            fieldResolution: 4,        // CSS pixels between wind samples of the screen grid
+            fieldResolution: 4,        // CSS pixels between velocity samples of the screen grid
             pixelRatio: 1              // canvas pixels per CSS pixel (2 = sharper on retina, 4x the work)
         },
 
@@ -112,7 +122,7 @@
             if (!this.options.colorScale) this.options.colorScale = parts.defaultColorScale;
 
             // -- data / frame cache (frame-cache.js) --
-            this._data = null;          // the WindData currently displayed
+            this._data = null;          // the VelocityData currently displayed
             this._status = "idle";      // "idle" | "loading" | "ready" | "error"
             this._error = null;
             this._frames = new Map();   // cache: key -> { promise, data, abort }
@@ -123,7 +133,7 @@
             // -- screen grid (speed-field.js) --
             this._gridReady = false;
             this._rebuildHandle = 0;
-            this._tmp = new Float32Array(2);   // scratch space for WindData.sample()
+            this._tmp = new Float32Array(2);   // scratch space for VelocityData.sample()
 
             // -- particles / animation (particles.js) --
             this._wantRunning = this.options.autoStart !== false;
@@ -138,7 +148,7 @@
         // ---- public API (the rest comes from the mixins) ------------------
 
         /**
-         * Change any option while the layer is running, e.g. wind.setOptions({ particleCount: 8000 }).
+         * Change any option while the layer is running, e.g. layer.setOptions({ particleCount: 8000 }).
          * Only the parts that depend on the changed options are redone.
          */
         setOptions: function (opts) {
@@ -146,6 +156,7 @@
             const sourceChanged = opts && (
                 ("source" in opts && opts.source !== previous.source) ||
                 ("timeSource" in opts && opts.timeSource !== previous.timeSource) ||
+                ("format" in opts && opts.format !== previous.format) ||
                 ("level" in opts && opts.level !== previous.level) ||
                 ("levelType" in opts && opts.levelType !== previous.levelType));
 
@@ -156,7 +167,7 @@
                 this._allocParticles();
                 if (this._gridReady) this._initParticles();
             }
-            if (o.colorScale !== previous.colorScale) {
+            if (o.colorScale !== previous.colorScale || o.fadeBelow !== previous.fadeBelow) {
                 this._buildLut();
                 if (this._gridReady) this._drawField();
             }
@@ -179,9 +190,9 @@
         getSource: function () { return this.options.source; },
         getStatus: function () { return this._status; },       // "idle" | "loading" | "ready" | "error"
         getError: function () { return this._error; },
-        getData: function () { return this._data; },            // the WindData on screen
+        getData: function () { return this._data; },            // the VelocityData on screen
 
-        /** Wind at a point from the cached data: { u, v, speed } or null if there is no data there. */
+        /** Velocity at a point from the cached data: { u, v, speed } or null if there is no data there. */
         getVector: function (lat, lon) {
             return this._data ? this._data.getVector(lat, lon) : null;
         },
@@ -349,8 +360,10 @@
     L.windField = L.easyVelocity;
 
     // Handy extras for application code and the demo page.
-    L.easyVelocity.WindData = parts.WindData;
+    L.easyVelocity.VelocityData = parts.VelocityData;
+    L.easyVelocity.WindData = parts.VelocityData;   // old name
     L.easyVelocity.Grib2 = parts.grib2;
+    L.easyVelocity.NetCDF = parts.netcdf;
     L.easyVelocity.createTestField = parts.createTestField;
     L.easyVelocity.gfsUrl = parts.gfsUrl;
     L.easyVelocity.gfsForecast = parts.gfsForecast;
@@ -359,10 +372,12 @@
     L.easyVelocity.gefsMeanForecast = parts.gefsMeanForecast;
     L.easyVelocity.timeList = parts.timeList;
     L.easyVelocity.defaultColorScale = parts.defaultColorScale;
+    L.easyVelocity.speedUnits = parts.speedUnits;
     L.easyVelocity.installTimeDimension = parts.installTimeDimension;
 
     L.windField.WindData = L.easyVelocity.WindData;
     L.windField.Grib2 = L.easyVelocity.Grib2;
+    L.windField.NetCDF = L.easyVelocity.NetCDF;
     L.windField.createTestField = L.easyVelocity.createTestField;
     L.windField.gfsUrl = L.easyVelocity.gfsUrl;
     L.windField.gfsForecast = L.easyVelocity.gfsForecast;

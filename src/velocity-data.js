@@ -1,22 +1,24 @@
 /*
- * wind-data.js — a wind grid you can ask "what is the wind at this latitude/longitude?"
- * ===================================================================================
+ * velocity-data.js — a velocity grid you can ask "what is the flow at this latitude/longitude?"
+ * ==========================================================================================
  *
  * Part of leaflet.easyvelocity. Pure JavaScript: no Leaflet, no DOM, no network.
  *
  * This is the one data structure shared by BOTH halves of the plugin:
- *   - the loaders (grib-loader.js, test-field.js) BUILD a WindData from whatever source they read;
- *   - the Leaflet layer (leaflet.easyvelocity.js and friends) only ever ASKS a WindData for wind vectors.
+ *   - the loaders (grib-loader.js, netcdf-loader.js, test-field.js) BUILD a VelocityData from whatever they read;
+ *   - the Leaflet layer (leaflet.easyvelocity.js and friends) only ever ASKS a VelocityData for vectors.
  * Because of that, the drawing code never needs to know whether the numbers came from a
- * GRIB2 file, a test generator, or something added in the future (e.g. NetCDF).
+ * GRIB2 file, a NetCDF file or a test generator, nor whether they are wind, ocean currents or
+ * any other U/V field.
  *
  * WHAT IS STORED
  * --------------
  * A regular latitude/longitude grid with two values per point, U and V:
- *   u  how fast the air moves towards the EAST  (m/s)   negative = towards the west
- *   v  how fast the air moves towards the NORTH (m/s)   negative = towards the south
- * Wind SPEED is sqrt(u*u + v*v). The direction the wind blows TOWARDS follows from atan2(u, v).
- * (Meteorologists name a wind by where it comes FROM, which is 180 degrees opposite.)
+ *   u  how fast the air / water moves towards the EAST  (m/s)   negative = towards the west
+ *   v  how fast the air / water moves towards the NORTH (m/s)   negative = towards the south
+ * SPEED is sqrt(u*u + v*v). The direction of flow (TOWARDS) follows from atan2(u, v).
+ * (Meteorologists name a wind by where it comes FROM, 180 degrees opposite; oceanographers
+ * name a current by where it goes TO.)
  *
  * Grid point (i, j) is at   longitude = lon0 + i * dx     latitude = lat0 + j * dy
  * and its numbers live at   index = j * ni + i            in the u and v arrays.
@@ -29,7 +31,7 @@
 
     const parts = (root.EasyVelocityParts = root.EasyVelocityParts || {});
 
-    class WindData {
+    class VelocityData {
         /**
          * @param {object} g
          * @param {number} g.lat0  latitude of the first row
@@ -38,8 +40,8 @@
          * @param {number} g.dy    latitude step between rows, degrees (negative = southwards)
          * @param {number} g.ni    number of columns
          * @param {number} g.nj    number of rows
-         * @param {Float32Array} g.u  east-ward wind, length ni * nj
-         * @param {Float32Array} g.v  north-ward wind, length ni * nj
+         * @param {Float32Array} g.u  eastward velocity, length ni * nj
+         * @param {Float32Array} g.v  northward velocity, length ni * nj
          * @param {object} [g.info]   free-form description (name, valid time, ...) shown in the UI
          */
         constructor(g) {
@@ -61,7 +63,7 @@
         }
 
         /**
-         * Bilinear interpolation of the wind at any latitude/longitude.
+         * Bilinear interpolation of the velocity at any latitude/longitude.
          *
          * Allocation-free on purpose: this runs hundreds of thousands of times each time the
          * map moves, so it writes into a caller-supplied array instead of creating an object.
@@ -141,5 +143,6 @@
         }
     }
 
-    parts.WindData = WindData;
+    parts.VelocityData = VelocityData;
+    parts.WindData = VelocityData;   // old name, kept for compatibility
 })(globalThis);

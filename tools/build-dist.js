@@ -15,9 +15,12 @@ const root = path.join(__dirname, "..");
 const files = [
     "grib2-unpack.js",
     "grib2-reader.js",
-    "wind-data.js",
+    "netcdf-reader.js",
+    "netcdf4-reader.js",
+    "velocity-data.js",
     "test-field.js",
     "grib-loader.js",
+    "netcdf-loader.js",
     "time-sources.js",
     "gfs.js",
     "frame-cache.js",

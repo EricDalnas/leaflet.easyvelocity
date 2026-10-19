@@ -1,5 +1,5 @@
 /*
- * particles.js — the animated wind particles
+ * particles.js — the animated flow particles
  * ===========================================
  *
  * Part of leaflet.easyvelocity. This file is a MIXIN for the L.EasyVelocity layer: its methods are
@@ -9,7 +9,7 @@
  * -----------------------
  * Thousands of tiny "particles" are placed at random positions. Every animation frame
  * (about 60 times a second) each particle:
- *   1. looks up the wind at its position in the screen grid built by speed-field.js,
+ *   1. looks up the velocity at its position in the screen grid built by speed-field.js,
  *   2. moves a little way in that direction,
  *   3. draws a short line from its old to its new position.
  * Lines from previous frames are faded out a little each frame instead of erased, which
@@ -17,7 +17,7 @@
  * random position, so the picture stays evenly covered.
  *
  *      frame n                 frame n+1
- *        o  ->  wind  ->         o          the line drawn between the two positions is one
+ *        o  ->  flow  ->         o          the line drawn between the two positions is one
  *      (x, y)               (x + dx, y + dy)   small piece of a trail
  *
  * PERFORMANCE: thousands of particles, 60 frames a second, so
@@ -30,11 +30,11 @@
  *   _age[i]          frames lived so far; -1 means "dormant": waiting for a place with data
  *   _maxAge[i]       lifetime in frames (randomised so they do not all die at once)
  *
- * WIND DIRECTION ON SCREEN
+ * FLOW DIRECTION ON SCREEN
  *   u (east)  increases x (moves right)
  *   v (north) DEcreases y (screen y grows downwards)       so:  dy = -v * scale
  *
- * MISSING DATA: if the wind under a particle is NaN (outside the data, or a hole), the
+ * MISSING DATA: if the velocity under a particle is NaN (outside the data, or a hole), the
  * particle becomes dormant, then respawns somewhere that has data. That is the
  * "disappears and reappears" behaviour.
  */
@@ -77,7 +77,7 @@
         },
 
         /**
-         * Put particle i at a random canvas position that has wind data.
+         * Put particle i at a random canvas position that has data.
          * Tries 8 random spots; if none has data the particle goes dormant (age = -1) and is
          * retried on the next frame.
          * @returns {boolean} true if it was placed
@@ -93,7 +93,7 @@
                 const x = Math.random() * (canvasW - 1);
                 const y = Math.random() * (canvasH - 1);
                 const gridIndex = Math.round(y * toGrid) * gridW + Math.round(x * toGrid);
-                if (gu[gridIndex] === gu[gridIndex]) {          // not NaN: there is wind data here
+                if (gu[gridIndex] === gu[gridIndex]) {          // not NaN: there is data here
                     this._px[i] = x;
                     this._py[i] = y;
                     this._age[i] = 0;
@@ -168,7 +168,7 @@
             const gridH = this._gh;
             const toGrid = 1 / this._cell;
 
-            // Pixels moved per frame for 1 m/s of wind. Deliberately independent of zoom, so the
+            // Pixels moved per frame for 1 m/s of velocity. Deliberately independent of zoom, so the
             // motion looks the same at every zoom level (as on windy.com); particle density is
             // constant too, because the count is spread over the same screen-sized canvas.
             const pixelsPerMps = 0.15 * o.particleSpeed * this._ratio;
@@ -197,8 +197,8 @@
                 const fy = gy - iy;          // 0..1 down the cell
                 const b = iy * gridW + ix;   // index of the cell's top-left corner
 
-                // Bilinear interpolation of the wind from the 4 corners (the same idea as in
-                // WindData.sample, see wind-data.js).
+                // Bilinear interpolation of the velocity from the 4 corners (the same idea as in
+                // VelocityData.sample, see velocity-data.js).
                 const u = (gu[b] * (1 - fx) + gu[b + 1] * fx) * (1 - fy) +
                     (gu[b + gridW] * (1 - fx) + gu[b + gridW + 1] * fx) * fy;
                 const v = (gv[b] * (1 - fx) + gv[b + 1] * fx) * (1 - fy) +

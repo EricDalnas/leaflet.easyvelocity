@@ -2,7 +2,7 @@
  * test-field.js — a synthetic wind field for development
  * =======================================================
  *
- * Part of leaflet.easyvelocity. Pure JavaScript. Needs wind-data.js.
+ * Part of leaflet.easyvelocity. Pure JavaScript. Needs velocity-data.js.
  *
  * Real GRIB2 files are large and need network access (and CORS permission). This generator
  * produces an instantly available, visually obvious wind field so the map, the particles,
@@ -27,7 +27,7 @@
 
     /**
      * @param {number} [hours]  hours since the first time shown; 0 = initial pattern
-     * @returns {WindData}      global 1-degree grid (360 x 181 points), lat 90..-90, lon -180..179
+     * @returns {VelocityData}  global 1-degree grid (360 x 181 points), lat 90..-90, lon -180..179
      */
     function createTestField(hours) {
         hours = hours || 0;
@@ -76,7 +76,7 @@
             }
         }
 
-        return new parts.WindData({
+        return new parts.VelocityData({
             lat0: 90, lon0: -180, dx: 1, dy: -1, ni, nj, u, v,
             info: { name: "Synthetic test field", units: "m/s" }
         });

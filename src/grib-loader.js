@@ -1,14 +1,14 @@
 /*
- * grib-loader.js — getting wind data from a URL into a WindData
- * ==============================================================
+ * grib-loader.js — getting U/V data from a GRIB2 URL into a VelocityData
+ * =======================================================================
  *
  * Part of leaflet.easyvelocity. Pure JavaScript apart from fetch(). Needs grib2-reader.js,
- * wind-data.js and test-field.js.
+ * velocity-data.js and test-field.js; hands NetCDF sources to netcdf-loader.js (see loadSource).
  *
  * THE JOB
  * -------
- *   loadSource("https://.../gfs.t00z.pgrb2.0p25.f000", options)   ->  Promise<WindData>
- *   loadSource("test", options)                                     ->  Promise<WindData>
+ *   loadSource("https://.../gfs.t00z.pgrb2.0p25.f000", options)   ->  Promise<VelocityData>
+ *   loadSource("test", options)                                     ->  Promise<VelocityData>
  *
  * THE PROBLEM
  * -----------
@@ -212,6 +212,9 @@
                 while (buffer.length + queuedBytes >= bytesNeeded) {
                     mergeQueueIntoBuffer();
                     if (!parts.grib2.isGribHeader(buffer)) {
+                        if (parts.netcdf && (parts.netcdf.isNetcdf(buffer) || parts.netcdf.isHdf5(buffer))) {
+                            throw new Error("Response is a NetCDF file, not GRIB2: use the layer option format: \"netcdf\".");
+                        }
                         throw new Error("Response is not a GRIB2 file (the URL may return an HTML error page).");
                     }
                     const length = parts.grib2.messageLength(buffer);
@@ -260,7 +263,7 @@
         }
 
         const g = pair.u.grid;
-        return new parts.WindData({
+        return new parts.VelocityData({
             lat0: g.lat0, lon0: g.lon0, dx: g.dx, dy: g.dy, ni: g.ni, nj: g.nj,
             u: pair.u.values,
             v: pair.v.values,
@@ -279,22 +282,30 @@
     /**
      * The single entry point used by the layer.
      *
-     * @param {string|WindData} source  "test", a GRIB2 URL, or an already built WindData
+     * @param {string|VelocityData} source  "test", a GRIB2 or NetCDF URL, or an already built VelocityData
      * @param {object} options
-     *        level, levelType   which wind to pick (default 10 m above ground = 10, 103)
+     *        format             "auto" (default: NetCDF if the URL looks like it, see netcdf-loader.js),
+     *                           "grib2" or "netcdf"
+     *        level, levelType   which level to pick (default 10 m above ground = 10, 103)
      *        hours              (test source only) hours since the first time shown
      *        signal             AbortSignal to cancel the download
      *        onProgress(bytes)  called while streaming
-     *        fetchOptions       extra fetch() options (e.g. credentials), streaming strategy only
-     * @returns {Promise<WindData>}
+     *        fetchOptions       extra fetch() options (e.g. credentials), streaming / NetCDF download only
+     * @returns {Promise<VelocityData>}
      */
     async function loadSource(source, options) {
-        if (source instanceof parts.WindData) return source;
+        if (source instanceof parts.VelocityData) return source;
         if (typeof source !== "string" || !source.trim()) throw new Error("No data source specified.");
         if (source === "test") return parts.createTestField(options.hours);
-        return loadGrib2(source.trim(), options);
+        const url = source.trim();
+        const format = options.format || "auto";
+        if (format === "netcdf" || (format === "auto" && parts.isNetcdfUrl && parts.isNetcdfUrl(url))) {
+            return parts.loadNetcdf(url, options);
+        }
+        return loadGrib2(url, options);
     }
 
     parts.isAbortError = isAbortError;
+    parts.fetchChecked = fetchChecked;
     parts.loadSource = loadSource;
 })(globalThis);

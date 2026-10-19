@@ -1,7 +1,7 @@
 {
   "name": "leaflet.easyvelocity",
   "version": "0.1.0",
-  "description": "Leaflet plugin for wind and current velocity fields, with direct GRIB2 loading and animated particles.",
+  "description": "Leaflet plugin for wind and current velocity fields, with direct GRIB2 and NetCDF loading and animated particles.",
   "main": "dist/leaflet.easyvelocity.js",
   "browser": "dist/leaflet.easyvelocity.js",
   "files": [
@@ -21,6 +21,7 @@
     "velocity-field",
     "weather",
     "grib2",
+    "netcdf",
     "particles",
     "canvas"
   ],

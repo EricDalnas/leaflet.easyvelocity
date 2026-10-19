@@ -4,7 +4,7 @@
  *
  * Part of leaflet.easyvelocity. Pure JavaScript, no dependencies.
  *
- * A time slider (see time-dimension.js) deals in TIMES; the wind layer deals in SOURCES
+ * A time slider (see time-dimension.js) deals in TIMES; the velocity layer deals in SOURCES
  * (a file URL for each time step). This tiny helper builds the bridge from a plain list:
  *
  *   const sequence = L.easyVelocity.timeList([

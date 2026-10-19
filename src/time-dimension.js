@@ -20,14 +20,14 @@
  *   3. When the clock has switched, it fires "timeload"; layers update their display (`_update`).
  *   The player also announces upcoming times ("timeloading") so layers can prefetch them.
  *
- * Our wrapper layer translates that into the wind layer's own API:
- *   isReady(T)             ->  windLayer.isTimeReady(T)
- *   "timeloading" {T}      ->  windLayer.prefetchTime(T), then fire "timeload"
- *   switch to T (_update)  ->  windLayer.setTime(T)
+ * Our wrapper layer translates that into the velocity layer's own API:
+ *   isReady(T)             ->  velocityLayer.isTimeReady(T)
+ *   "timeloading" {T}      ->  velocityLayer.prefetchTime(T), then fire "timeload"
+ *   switch to T (_update)  ->  velocityLayer.setTime(T)
  *
  * USAGE
- *   const wind = L.easyVelocity({ timeSource: (timeMs) => "https://.../file-for-that-time" });
- *   L.timeDimension.layer.easyVelocity(wind).addTo(map);     // NOT wind.addTo(map)
+ *   const layer = L.easyVelocity({ timeSource: (timeMs) => "https://.../file-for-that-time" });
+ *   L.timeDimension.layer.easyVelocity(layer).addTo(map);     // NOT layer.addTo(map)
  */
 (function (root) {
     "use strict";
@@ -59,7 +59,7 @@
                 });
             },
 
-            // "Could you show time T instantly?"  (_baseLayer is the wind layer we wrap)
+            // "Could you show time T instantly?"  (_baseLayer is the velocity layer we wrap)
             isReady: function (time) {
                 return this._baseLayer.isTimeReady(time);
             },
