@@ -30,7 +30,7 @@ const files = [
 ];
 
 const version = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")).version;
-const banner = "/*! leaflet.easyvelocity v" + version + " | Proprietary, all rights reserved. See LICENSE. */\n" +
+const banner = "/*! leaflet.easyvelocity v" + version + " | Copyright (c) 2026 Eric Dalnas. All rights reserved. See LICENSE. */\n" +
     "/* Built from src/ by tools/build-dist.js: edit the files in src/, not this file. */\n";
 
 const body = files.map((name) => {
