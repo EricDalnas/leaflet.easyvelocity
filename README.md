@@ -191,4 +191,4 @@ The data files don't depend on Leaflet or the DOM, so they also run in Node or a
 
 ## License
 
-Proprietary, all rights reserved; see [LICENSE](LICENSE) (fill in `[OWNER NAME]`). The plugin contains no third-party code. Leaflet, Leaflet.TimeDimension, h5wasm and the map tiles used by the demo come from their own sources under their own terms. The sample data in `examples/data` is from NOAA (see `NOTICE.txt`).
+Copyright © 2026 Eric Dalnas. Proprietary, all rights reserved; see [LICENSE](LICENSE). The plugin contains no third-party code. Leaflet, Leaflet.TimeDimension, h5wasm and the map tiles used by the demo come from their own sources under their own terms. The sample data in `examples/data` is from NOAA (see `NOTICE.txt`).

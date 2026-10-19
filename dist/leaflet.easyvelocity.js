@@ -1,4 +1,4 @@
-/*! leaflet.easyvelocity v0.1.0 | Proprietary, all rights reserved. See LICENSE. */
+/*! leaflet.easyvelocity v0.1.0 | Copyright (c) 2026 Eric Dalnas. All rights reserved. See LICENSE. */
 /* Built from src/ by tools/build-dist.js: edit the files in src/, not this file. */
 
 /* ===== src/grib2-unpack.js ===== */

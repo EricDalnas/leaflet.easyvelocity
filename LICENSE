@@ -1,6 +1,6 @@
 leaflet.easyvelocity: PROPRIETARY SOFTWARE LICENSE NOTICE
 
-Copyright (c) 2026 [OWNER NAME]. All rights reserved.
+Copyright (c) 2026 Eric Dalnas. All rights reserved.
 
 This software, including its source code, documentation and build scripts (the "Software"),
 is proprietary and confidential. It is NOT open-source software.
@@ -30,6 +30,3 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
 PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM,
 DAMAGES OR OTHER LIABILITY ARISING FROM THE USE OF THE SOFTWARE.
-
-(Replace [OWNER NAME] with the legal owner. Have counsel review this text before relying on
-it; it is a plain template, not legal advice.)
