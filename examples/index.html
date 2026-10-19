@@ -310,10 +310,6 @@
             }
         ).addTo(map);
 
-        // A regular vector layer alongside, for comparison.
-        L.circleMarker([40, -75], { radius: 6, color: "#000", weight: 2, fillColor: "#fff", fillOpacity: 1 })
-            .bindTooltip("Regular Leaflet vector layer").addTo(map);
-
         // The real source is set by useDataset() at the bottom.
         const wind = L.easyVelocity({
             source: "test",
@@ -403,6 +399,11 @@
                 const t = Date.parse(i.validTime);
                 if (map.timeDimension.getAvailableTimes().join() !== String(t)) map.timeDimension.setAvailableTimes([t], "replace");
             }
+            // Zoom to a custom file once, unless it covers the whole globe.
+            if (fitToCustomData) {
+                fitToCustomData = false;
+                if (!e.data.global) map.fitBounds(wind.getBounds());
+            }
         });
         wind.on("error", (e) => setStatus("Error: " + e.message, true));
         wind.on("start stop", () => { $("toggleBtn").textContent = wind.isRunning() ? "Stop particles" : "Start particles"; });
@@ -486,6 +487,7 @@
         }
 
         let customRequest = 0;
+        let fitToCustomData = false;
         async function loadCustom() {
             const url = $("customUrl").value.trim();
             if (!url) { setStatus("Enter a GRIB2 or NetCDF URL first.", true); return; }
@@ -495,6 +497,7 @@
             let times;
             try { times = await timesInFile(url); } catch (e) { setStatus("Error: " + e.message, true); return; }
             if (request !== customRequest) return;   // another URL was loaded meanwhile
+            fitToCustomData = true;
 
             const options = { level: 10, levelType: 103, colorScale: colors.surface };
             if (times.length > 1) {

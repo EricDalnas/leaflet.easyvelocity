@@ -195,6 +195,16 @@
             return this._data ? this._data.getVector(lat, lon) : null;
         },
 
+        /** The area covered by the data on screen as L.LatLngBounds, or null before anything has loaded. */
+        getBounds: function () {
+            const d = this._data;
+            if (!d) return null;
+            let west = Math.min(d.lon0, d.lon0 + (d.ni - 1) * d.dx);
+            let east = Math.max(d.lon0, d.lon0 + (d.ni - 1) * d.dx);
+            if (west >= 180) { west -= 360; east -= 360; }   // 0..360 grids
+            return L.latLngBounds([d.lat0, west], [d.lat0 + (d.nj - 1) * d.dy, east]);
+        },
+
         // ---- Leaflet layer lifecycle -------------------------------------
 
         /** Leaflet calls this to learn which map events the layer wants (and unsubscribes automatically on removal). */

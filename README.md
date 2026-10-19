@@ -57,6 +57,7 @@ layer.start();  layer.stop();  layer.reload();
 layer.setSource(url);
 layer.setOptions({ particleCount: 8000 });
 layer.getVector(lat, lon);             // { u, v, speed } in m/s, or null where there's no data
+layer.getBounds();                     // area covered by the data, e.g. map.fitBounds(layer.getBounds())
 layer.getLegend();                     // { min, max, units, factor, fadeBelow, stops } in display units
 layer.toDisplaySpeed(metresPerSecond); // converts to the chosen units
 ```
