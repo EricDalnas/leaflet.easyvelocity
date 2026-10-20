@@ -24,7 +24,7 @@ Load Leaflet, optionally Leaflet.TimeDimension, then the plugin:
 
 The source can be any URL the browser is allowed to fetch, for example `"data/wind.grib2"` or `"https://example.com/currents.nc"`. Use `source: "test"` for a generated sample field that needs no download.
 
-`L.EasyVelocity` is the class behind `L.easyVelocity()`. The older names `L.windField`, `L.timeDimension.layer.windField` and `WindData` still work.
+`L.EasyVelocity` is the class behind `L.easyVelocity()`.
 
 ## Running the demo
 

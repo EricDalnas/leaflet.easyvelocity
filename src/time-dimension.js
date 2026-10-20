@@ -42,11 +42,7 @@
      */
     parts.installTimeDimension = function installTimeDimension() {
         if (!L.TimeDimension || !L.TimeDimension.Layer || !L.timeDimension) return false;
-        if (L.TimeDimension.Layer.EasyVelocity) {
-            L.TimeDimension.Layer.WindField = L.TimeDimension.Layer.EasyVelocity;
-            L.timeDimension.layer.windField = L.timeDimension.layer.easyVelocity;
-            return true;
-        }
+        if (L.TimeDimension.Layer.EasyVelocity) return true;
 
         L.TimeDimension.Layer.EasyVelocity = L.TimeDimension.Layer.extend({
 
@@ -85,8 +81,6 @@
         L.timeDimension.layer.easyVelocity = function (layer, options) {
             return new L.TimeDimension.Layer.EasyVelocity(layer, options);
         };
-        L.TimeDimension.Layer.WindField = L.TimeDimension.Layer.EasyVelocity;
-        L.timeDimension.layer.windField = L.timeDimension.layer.easyVelocity;
         return true;
     };
 })(globalThis);

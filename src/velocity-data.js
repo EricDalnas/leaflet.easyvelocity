@@ -144,5 +144,4 @@
     }
 
     parts.VelocityData = VelocityData;
-    parts.WindData = VelocityData;   // old name, kept for compatibility
 })(globalThis);

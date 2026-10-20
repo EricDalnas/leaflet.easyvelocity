@@ -1294,7 +1294,6 @@
     }
 
     parts.VelocityData = VelocityData;
-    parts.WindData = VelocityData;   // old name, kept for compatibility
 })(globalThis);
 
 /* ===== src/test-field.js ===== */
@@ -2921,11 +2920,7 @@
      */
     parts.installTimeDimension = function installTimeDimension() {
         if (!L.TimeDimension || !L.TimeDimension.Layer || !L.timeDimension) return false;
-        if (L.TimeDimension.Layer.EasyVelocity) {
-            L.TimeDimension.Layer.WindField = L.TimeDimension.Layer.EasyVelocity;
-            L.timeDimension.layer.windField = L.timeDimension.layer.easyVelocity;
-            return true;
-        }
+        if (L.TimeDimension.Layer.EasyVelocity) return true;
 
         L.TimeDimension.Layer.EasyVelocity = L.TimeDimension.Layer.extend({
 
@@ -2964,8 +2959,6 @@
         L.timeDimension.layer.easyVelocity = function (layer, options) {
             return new L.TimeDimension.Layer.EasyVelocity(layer, options);
         };
-        L.TimeDimension.Layer.WindField = L.TimeDimension.Layer.EasyVelocity;
-        L.timeDimension.layer.windField = L.timeDimension.layer.easyVelocity;
         return true;
     };
 })(globalThis);
@@ -3337,12 +3330,9 @@
 
     L.EasyVelocity = EasyVelocity;
     L.easyVelocity = function (options) { return new EasyVelocity(options); };
-    L.WindField = EasyVelocity;
-    L.windField = L.easyVelocity;
 
     // Handy extras for application code and the demo page.
     L.easyVelocity.VelocityData = parts.VelocityData;
-    L.easyVelocity.WindData = parts.VelocityData;   // old name
     L.easyVelocity.Grib2 = parts.grib2;
     L.easyVelocity.NetCDF = parts.netcdf;
     L.easyVelocity.createTestField = parts.createTestField;
@@ -3352,14 +3342,6 @@
     L.easyVelocity.defaultColorScale = parts.defaultColorScale;
     L.easyVelocity.speedUnits = parts.speedUnits;
     L.easyVelocity.installTimeDimension = parts.installTimeDimension;
-
-    L.windField.WindData = L.easyVelocity.WindData;
-    L.windField.Grib2 = L.easyVelocity.Grib2;
-    L.windField.NetCDF = L.easyVelocity.NetCDF;
-    L.windField.createTestField = L.easyVelocity.createTestField;
-    L.windField.timeList = L.easyVelocity.timeList;
-    L.windField.defaultColorScale = L.easyVelocity.defaultColorScale;
-    L.windField.installTimeDimension = L.easyVelocity.installTimeDimension;
 
     // If Leaflet.TimeDimension was loaded first, enable L.timeDimension.layer.easyVelocity(...).
     parts.installTimeDimension();
