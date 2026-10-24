@@ -2,7 +2,7 @@
  * velocity-data.js — a velocity grid you can ask "what is the flow at this latitude/longitude?"
  * ==========================================================================================
  *
- * Part of leaflet.easyvelocity. Pure JavaScript: no Leaflet, no DOM, no network.
+ * Part of leaflet.easyvelocity. Pure JavaScript.
  *
  * This is the one data structure shared by BOTH halves of the plugin:
  *   - the loaders (grib-loader.js, netcdf-loader.js, test-field.js) BUILD a VelocityData from whatever they read;

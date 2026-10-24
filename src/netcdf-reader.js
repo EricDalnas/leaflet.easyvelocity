@@ -2,7 +2,7 @@
  * netcdf-reader.js — reading a NetCDF "classic" file: its header, attributes and variables
  * =========================================================================================
  *
- * Part of leaflet.easyvelocity. Pure JavaScript: no Leaflet, no DOM, no network.
+ * Part of leaflet.easyvelocity. Pure JavaScript.
  *
  * WHAT IS NETCDF?
  * ---------------

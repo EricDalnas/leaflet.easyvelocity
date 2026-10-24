@@ -32,6 +32,8 @@ Serve the folder with any local web server (VS Code's Live Server works) and ope
 
 The demo starts on the latest GFS surface wind forecast. Other data is in the Source list, grouped by file format. The settings panel can be dragged, resized and collapsed, and on phones it sits along the top.
 
+**Land borders** adds country outlines and coastlines above the wind display. Leave the GeoJSON field blank for the bundled Natural Earth 1:50m countries, or enter a GeoJSON URL and click Load (or press Enter). Uncheck Land borders to hide them. Custom files should contain longitude/latitude lines or polygons in WGS84; cross-origin servers must allow CORS. These controls belong to the demo, not the `L.easyVelocity` layer API. The bundled outlines are generalized for world maps, not detailed coastal navigation.
+
 Add `?dist` to the URL to load the built file instead of the separate source files, or `?preferCanvas=1` to run the map with Leaflet's canvas renderer.
 
 ## Options and methods
@@ -192,3 +194,5 @@ The data files don't depend on Leaflet or the DOM, so they also run in Node or a
 ## License
 
 Copyright © 2026 Eric Dalnas. Proprietary, all rights reserved; see [LICENSE](LICENSE). The plugin contains no third-party code. Leaflet, Leaflet.TimeDimension, h5wasm and the map tiles used by the demo come from their own sources under their own terms. The sample data in `examples/data` is from NOAA (see `NOTICE.txt`).
+
+The bundled [Natural Earth country outlines](dist/ne_50m_admin_0_countries.geojson) are public-domain data and are not covered by the proprietary software license. They may be used, modified and redistributed, including commercially, without permission or required attribution. See [dist/NOTICE.txt](dist/NOTICE.txt) for the source and [Natural Earth's terms](https://www.naturalearthdata.com/about/terms-of-use/). Boundaries reflect the upstream dataset and do not imply endorsement of territorial claims.

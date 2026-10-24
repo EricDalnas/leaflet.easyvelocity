@@ -84,6 +84,8 @@
         #source { word-break: break-all; font-size: 11px; color: #666; }
         #status { margin-top: 4px; font-size: 12px; }
         #status.error { color: #b00020; font-weight: 600; }
+        #bordersStatus { font-size: 12px; overflow-wrap: anywhere; }
+        #bordersStatus.error { color: #b00020; }
         #cursor { font-size: 12px; color: #444; min-height: 1.4em; }
 
         /* legend */
@@ -162,6 +164,16 @@
                 <label><input type="checkbox" id="fadeCalm" /> <span id="fadeLabel">Fade calm winds</span></label>
             </div>
 
+            <hr />
+            <div class="row checks">
+                <label><input type="checkbox" id="showBorders" /> Land borders</label>
+            </div>
+            <div class="row">
+                <label for="bordersUrl">GeoJSON</label>
+                <input type="text" id="bordersUrl" placeholder="Natural Earth (default)" />
+                <button id="bordersLoadBtn" title="Apply borders URL">Load</button>
+            </div>
+            <div id="bordersStatus" role="status" aria-live="polite"></div>
             <hr />
             <div id="cursor">Hover over or tap the map to see the wind there.</div>
         </div>
@@ -326,6 +338,65 @@
 
         // ---- controls ----
         const $ = (id) => document.getElementById(id);
+        const defaultBordersUrl = "../dist/ne_50m_admin_0_countries.geojson";
+        const bordersPane = map.createPane("landBorders");
+        bordersPane.style.zIndex = 450;
+        bordersPane.style.pointerEvents = "none";
+        let bordersLayer = null;
+        let bordersLoadedUrl = null;
+        let bordersAbort = null;
+        let bordersRequest = 0;
+
+        async function updateBorders() {
+            const request = ++bordersRequest;
+            if (bordersAbort) bordersAbort.abort();
+            bordersAbort = null;
+            const status = $("bordersStatus");
+            status.textContent = "";
+            status.className = "";
+            if (bordersLayer) map.removeLayer(bordersLayer);
+            if (!$("showBorders").checked) return;
+            const url = $("bordersUrl").value.trim() || defaultBordersUrl;
+            if (bordersLayer && bordersLoadedUrl === url) {
+                bordersLayer.addTo(map);
+                return;
+            }
+            const controller = bordersAbort = new AbortController();
+            status.textContent = "Loading borders...";
+            try {
+                const response = await fetch(url, { signal: controller.signal });
+                if (!response.ok) throw new Error("HTTP " + response.status);
+                const data = await response.json();
+                if (request !== bordersRequest) return;
+                const nextLayer = L.geoJSON(data, {
+                    pane: "landBorders", interactive: false,
+                    filter: (feature) => feature.geometry &&
+                        ["Polygon", "MultiPolygon", "LineString", "MultiLineString", "GeometryCollection"].includes(feature.geometry.type),
+                    style: { color: "#222222", weight: 1.2, opacity: 0.85, fill: false },
+                    attribution: url === defaultBordersUrl
+                        ? 'Borders: <a href="https://www.naturalearthdata.com/">Natural Earth</a>' : null
+                });
+                if (!nextLayer.getLayers().length) throw new Error("No border lines or polygons in this GeoJSON.");
+                bordersLayer = nextLayer;
+                bordersLoadedUrl = url;
+                bordersLayer.addTo(map);
+                status.textContent = "";
+            } catch (error) {
+                if (request !== bordersRequest || error.name === "AbortError") return;
+                status.textContent = "Could not load borders: " + error.message;
+                status.className = "error";
+            } finally {
+                if (request === bordersRequest) bordersAbort = null;
+            }
+        }
+        $("showBorders").onchange = updateBorders;
+        $("bordersLoadBtn").onclick = () => {
+            $("showBorders").checked = true;
+            updateBorders();
+        };
+        $("bordersUrl").onkeydown = (event) => {
+            if (event.key === "Enter") $("bordersLoadBtn").click();
+        };
         const panel = $("controls");
         for (const p of [panel, $("legend")]) {
             L.DomEvent.disableClickPropagation(p);

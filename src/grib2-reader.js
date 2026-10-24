@@ -2,7 +2,7 @@
  * grib2-reader.js — a minimal GRIB2 file reader
  * ==============================================
  *
- * Part of leaflet.easyvelocity. Pure JavaScript: no Leaflet, no DOM, no network.
+ * Part of leaflet.easyvelocity. Pure JavaScript.
  * Needs grib2-unpack.js to be loaded first.
  *
  * WHAT IS GRIB2?

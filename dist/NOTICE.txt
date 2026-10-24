@@ -1,0 +1,17 @@
+Natural Earth map data
+
+File: ne_50m_admin_0_countries.geojson
+Dataset: Natural Earth Admin 0 - Countries, 1:50 million scale
+Downloaded: 2026-10-24; unmodified GeoJSON copy
+Source: https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_admin_0_countries.geojson
+Project: https://www.naturalearthdata.com/
+Terms: https://www.naturalearthdata.com/about/terms-of-use/
+
+All versions of Natural Earth raster and vector map data are in the public domain.
+Use, modification and redistribution, including commercial use, are permitted without
+permission or required attribution. Optional credit: Made with Natural Earth.
+This data is not covered by leaflet.easyvelocity's proprietary software license.
+
+Natural Earth is provided as a public service without guarantees of accuracy or
+fitness for a particular use. Boundaries reflect the upstream dataset and do not
+imply endorsement of territorial claims. Not for navigation.
