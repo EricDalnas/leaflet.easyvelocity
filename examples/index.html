@@ -161,12 +161,12 @@
             <div class="row checks">
                 <label><input type="checkbox" id="showParticles" checked /> Particles</label>
                 <label><input type="checkbox" id="showField" checked /> Velocity Heat Map</label>
-                <label><input type="checkbox" id="fadeCalm" /> <span id="fadeLabel">Fade calm winds</span></label>
+                <label><input type="checkbox" id="fadeCalm" checked/> <span id="fadeLabel">Fade calm winds</span></label>
             </div>
 
             <hr />
             <div class="row checks">
-                <label><input type="checkbox" id="showBorders" /> Land borders</label>
+                <label><input type="checkbox" id="showBorders" checked/> Land borders</label>
             </div>
             <div class="row">
                 <label for="bordersUrl">GeoJSON</label>
@@ -333,6 +333,7 @@
             showParticles: true,
             showSpeedField: true,
             opacity: 0.75,
+            fadeBelow: 8,
             units: "kt"
         });
 
@@ -346,6 +347,7 @@
         let bordersLoadedUrl = null;
         let bordersAbort = null;
         let bordersRequest = 0;
+        updateBorders();
 
         async function updateBorders() {
             const request = ++bordersRequest;
